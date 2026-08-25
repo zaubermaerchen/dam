@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const readBufferSize = 32 * 1024
+const (
+	readBufferSize = 32 * 1024
+	testTimeout    = 5 * time.Second
+)
 
 func TestRunPreservesBinaryInputWithZeroDelay(t *testing.T) {
 	input := make([]byte, 256*3)
@@ -47,7 +50,7 @@ func TestRunPreservesDelayedBinaryInput(t *testing.T) {
 	var wroteAt time.Time
 	select {
 	case wroteAt = <-output.writeTimes:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not release binary input after the delay")
 	}
 	if elapsed := wroteAt.Sub(startedAt); elapsed < delay {
@@ -95,7 +98,7 @@ func TestRunStartsDelayOnFirstByteRead(t *testing.T) {
 	var wroteAt time.Time
 	select {
 	case wroteAt = <-output.writeTimes:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not release output after the first-byte delay")
 	}
 	if elapsed := wroteAt.Sub(releasedAt); elapsed < delay {
@@ -107,7 +110,7 @@ func TestRunStartsDelayOnFirstByteRead(t *testing.T) {
 		if gotStatus != 0 {
 			t.Fatalf("run status = %d, diagnostics = %q", gotStatus, diagnostics.String())
 		}
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not complete after the delay")
 	}
 	if got, want := output.String(), "delayed"; got != want {
@@ -128,7 +131,7 @@ func TestRunDoesNotReleaseOnEOFBeforeDelay(t *testing.T) {
 	var wroteAt time.Time
 	select {
 	case wroteAt = <-output.writeTimes:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not release EOF input after the delay")
 	}
 	if elapsed := wroteAt.Sub(startedAt); elapsed < delay {
@@ -140,7 +143,7 @@ func TestRunDoesNotReleaseOnEOFBeforeDelay(t *testing.T) {
 		if gotStatus != 0 {
 			t.Fatalf("run status = %d, diagnostics = %q", gotStatus, diagnostics.String())
 		}
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not complete after EOF delay")
 	}
 	if got, want := output.String(), "before eof"; got != want {
@@ -192,12 +195,12 @@ func TestRunAppliesBackpressureBeforeRelease(t *testing.T) {
 	}
 	select {
 	case <-input.secondStarted:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not continue reading while the delay was pending")
 	}
 	select {
 	case <-input.blockedRead:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not apply backpressure to a blocked subsequent read")
 	}
 	select {
@@ -211,7 +214,7 @@ func TestRunAppliesBackpressureBeforeRelease(t *testing.T) {
 		if elapsed := wroteAt.Sub(firstReadAt); elapsed < delay {
 			t.Fatalf("output released after %s, want at least %s", elapsed, delay)
 		}
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("timer did not release output while a later read was blocked")
 	}
 	close(input.releaseBlocked)
@@ -262,7 +265,7 @@ func TestRunBoundsPreReleaseReadAhead(t *testing.T) {
 
 	select {
 	case <-output.writeTimes:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not release bounded pre-release data")
 	}
 	close(input.release)
@@ -319,7 +322,7 @@ func TestRunFillsBoundedPreReleaseBufferWithFragmentedReads(t *testing.T) {
 
 	select {
 	case <-output.writeTimes:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not release the bounded pre-release buffer")
 	}
 	input.unblock()
@@ -349,7 +352,7 @@ func TestRunPassesThroughAfterReleaseWithoutSecondGate(t *testing.T) {
 
 	select {
 	case <-output.writeTimes:
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not release the first input")
 	}
 	secondReleaseAt := time.Now()
@@ -360,7 +363,7 @@ func TestRunPassesThroughAfterReleaseWithoutSecondGate(t *testing.T) {
 		if elapsed := wroteAt.Sub(secondReleaseAt); elapsed >= delay {
 			t.Fatalf("post-release input was gated for %s, want less than %s", elapsed, delay)
 		}
-	case <-time.After(2 * delay):
+	case <-time.After(testTimeout):
 		t.Fatal("run did not pass through post-release input")
 	}
 

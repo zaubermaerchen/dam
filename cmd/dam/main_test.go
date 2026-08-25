@@ -36,6 +36,49 @@ func TestRunPreservesBinaryInputWithZeroDelay(t *testing.T) {
 	}
 }
 
+func TestRunPrintsVersionWithoutReadingInput(t *testing.T) {
+	input := &trackingReader{}
+	var output, diagnostics bytes.Buffer
+
+	if status := run([]string{"--version"}, input, &output, &diagnostics); status != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
+	}
+	if got, want := output.String(), "dam dev\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("successful version run wrote diagnostics: %q", diagnostics.String())
+	}
+	if input.reads != 0 {
+		t.Fatalf("version run read stdin %d times", input.reads)
+	}
+}
+
+func TestRunPrintsConfiguredVersion(t *testing.T) {
+	originalVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = originalVersion })
+
+	var output, diagnostics bytes.Buffer
+	if status := run([]string{"--version"}, strings.NewReader("ignored"), &output, &diagnostics); status != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
+	}
+	if got, want := output.String(), "dam v1.2.3\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
+func TestRunReportsVersionOutputErrors(t *testing.T) {
+	outputErr := errors.New("version output failed")
+	var diagnostics bytes.Buffer
+	if status := run([]string{"--version"}, &trackingReader{}, errorWriter{err: outputErr}, &diagnostics); status == 0 {
+		t.Fatal("version output error unexpectedly succeeded")
+	}
+	if !strings.Contains(diagnostics.String(), outputErr.Error()) {
+		t.Fatalf("version diagnostic = %q, want %q", diagnostics.String(), outputErr)
+	}
+}
+
 func TestRunPreservesDelayedBinaryInput(t *testing.T) {
 	const delay = 100 * time.Millisecond
 	input := eofReader{data: []byte{0x00, 0xff, 0x01, 0xfe, 0x7f}}
@@ -387,6 +430,7 @@ func TestRunRejectsInvalidArguments(t *testing.T) {
 	}{
 		{name: "missing", args: nil},
 		{name: "extra", args: []string{"1s", "2s"}},
+		{name: "version extra", args: []string{"--version", "extra"}},
 		{name: "invalid", args: []string{"not-a-duration"}},
 		{name: "negative", args: []string{"-1s"}},
 	}
@@ -585,6 +629,15 @@ type errorReader struct {
 
 func (r errorReader) Read([]byte) (int, error) {
 	return 0, r.err
+}
+
+type trackingReader struct {
+	reads int
+}
+
+func (r *trackingReader) Read([]byte) (int, error) {
+	r.reads++
+	return 0, errors.New("stdin should not be read")
 }
 
 type errorWriter struct {

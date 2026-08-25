@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const readBufferSize = 32 * 1024
+
 func TestRunPreservesBinaryInputWithZeroDelay(t *testing.T) {
 	input := make([]byte, 256*3)
 	for i := range input {

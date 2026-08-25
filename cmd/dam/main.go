@@ -9,10 +9,7 @@ import (
 	"time"
 )
 
-const (
-	readBufferSize       = 32 * 1024
-	preReleaseBufferSize = 64 * 1024
-)
+const preReleaseBufferSize = 64 * 1024
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))

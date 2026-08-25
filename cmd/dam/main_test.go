@@ -644,6 +644,12 @@ func (b *lockedBuffer) Len() int {
 	return b.Buffer.Len()
 }
 
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.Buffer.Bytes())
+}
+
 func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()

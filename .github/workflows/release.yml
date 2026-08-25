@@ -1,0 +1,236 @@
+name: Release
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "go.mod"
+      - "go.sum"
+      - "LICENSE"
+      - "README.md"
+      - "cmd/**"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dam-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve and validate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          number='(0|[1-9][0-9]*)'
+          prerelease_identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          build_identifier='[0-9A-Za-z-]+'
+          semver="^v${number}\.${number}\.${number}(-${prerelease_identifier}(\.${prerelease_identifier})*)?(\+${build_identifier}(\.${build_identifier})*)?$"
+
+          valid_versions=(v0.1.0 v1.2.3-0 v1.2.3-alpha.1 v1.2.3+build.01)
+          invalid_versions=(v1.2 v01.2.3 v1.2.3-01 v1.2.3-alpha.01)
+          for candidate in "${valid_versions[@]}"; do
+            if [[ ! "$candidate" =~ $semver ]]; then
+              echo "tag validator rejected valid version: $candidate" >&2
+              exit 1
+            fi
+          done
+          for candidate in "${invalid_versions[@]}"; do
+            if [[ "$candidate" =~ $semver ]]; then
+              echo "tag validator accepted invalid version: $candidate" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            version="$GITHUB_REF_NAME"
+            if [[ ! "$version" =~ $semver ]]; then
+              echo "invalid release tag: $version" >&2
+              exit 1
+            fi
+          else
+            version=snapshot
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs:
+      - prepare
+      - test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos:
+          - linux
+          - darwin
+          - windows
+        goarch:
+          - amd64
+          - arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build and package
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_OS: ${{ matrix.goos }}
+          TARGET_ARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          package_name="dam_${VERSION}_${TARGET_OS}_${TARGET_ARCH}"
+          staging="${RUNNER_TEMP}/${package_name}"
+          package_dir="${RUNNER_TEMP}/dam-package"
+          rm -rf "$staging" "$package_dir"
+          mkdir -p "$staging/$package_name" "$package_dir"
+
+          binary=dam
+          if [[ "$TARGET_OS" == windows ]]; then
+            binary+=.exe
+          fi
+          CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
+            go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "$staging/$package_name/$binary" ./cmd/dam
+          cp LICENSE README.md "$staging/$package_name/"
+          test -s "$staging/$package_name/$binary"
+
+          if [[ "$TARGET_OS" == linux && "$TARGET_ARCH" == amd64 ]]; then
+            actual_version="$("$staging/$package_name/$binary" --version)"
+            expected_version="dam $VERSION"
+            if [[ "$actual_version" != "$expected_version" ]]; then
+              echo "version output mismatch: got $actual_version, want $expected_version" >&2
+              exit 1
+            fi
+          fi
+
+          if [[ "$TARGET_OS" == windows ]]; then
+            archive="${package_name}.zip"
+            (cd "$staging" && zip -q -r "${RUNNER_TEMP}/${archive}" "$package_name")
+          else
+            archive="${package_name}.tar.gz"
+            tar -C "$staging" -czf "${RUNNER_TEMP}/${archive}" "$package_name"
+          fi
+          archive_path="${RUNNER_TEMP}/${archive}"
+          test -s "$archive_path"
+
+          expected="${RUNNER_TEMP}/${package_name}.expected"
+          actual="${RUNNER_TEMP}/${package_name}.actual"
+          {
+            printf '%s\n' "$package_name/"
+            printf '%s\n' "$package_name/$binary"
+            printf '%s\n' "$package_name/LICENSE"
+            printf '%s\n' "$package_name/README.md"
+          } | sort > "$expected"
+          if [[ "$TARGET_OS" == windows ]]; then
+            unzip -Z1 "$archive_path" | sort > "$actual"
+          else
+            tar -tzf "$archive_path" | sort > "$actual"
+          fi
+          diff -u "$expected" "$actual"
+          cp "$archive_path" "$package_dir/"
+      - name: Upload archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dam-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ runner.temp }}/dam-package/*
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release
+          merge-multiple: true
+      - name: Validate archives and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            "dam_${VERSION}_linux_amd64.tar.gz"
+            "dam_${VERSION}_linux_arm64.tar.gz"
+            "dam_${VERSION}_darwin_amd64.tar.gz"
+            "dam_${VERSION}_darwin_arm64.tar.gz"
+            "dam_${VERSION}_windows_amd64.zip"
+            "dam_${VERSION}_windows_arm64.zip"
+          )
+          mapfile -t actual < <(find release -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          if (( ${#actual[@]} != 6 )); then
+            echo "expected six archives, found ${#actual[@]}" >&2
+            exit 1
+          fi
+          printf '%s\n' "${expected[@]}" | sort > expected.txt
+          printf '%s\n' "${actual[@]}" > actual.txt
+          diff -u expected.txt actual.txt
+          for archive in "${expected[@]}"; do
+            test -s "release/$archive"
+          done
+          (
+            cd release
+            sha256sum "${expected[@]}" > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+          test -s release/SHA256SUMS
+      - name: Publish GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release already exists for tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          archives=(
+            "release/dam_${VERSION}_linux_amd64.tar.gz"
+            "release/dam_${VERSION}_linux_arm64.tar.gz"
+            "release/dam_${VERSION}_darwin_amd64.tar.gz"
+            "release/dam_${VERSION}_darwin_arm64.tar.gz"
+            "release/dam_${VERSION}_windows_amd64.zip"
+            "release/dam_${VERSION}_windows_arm64.zip"
+          )
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME" "${archives[@]}" release/SHA256SUMS

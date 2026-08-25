@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -423,6 +424,222 @@ func TestRunPassesThroughAfterReleaseWithoutSecondGate(t *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsDurationAndRepeatableSignalsInAnyOrder(t *testing.T) {
+	config, err := parseConfig([]string{
+		"--release-on=signal:USR1",
+		"250ms",
+		"--release-on",
+		"signal:SIGUSR1",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if config.delay == nil || *config.delay != 250*time.Millisecond {
+		t.Fatalf("delay = %v, want 250ms", config.delay)
+	}
+	if got, want := config.signals, []string{"SIGUSR1", "SIGUSR1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestParseConfigAcceptsSignalWithoutDuration(t *testing.T) {
+	config, err := parseConfig([]string{"--release-on", "signal:SIGUSR1"})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if config.delay != nil {
+		t.Fatalf("delay = %v, want nil", config.delay)
+	}
+	if got, want := config.signals, []string{"SIGUSR1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestParseConfigRejectsInvalidReleaseConditions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing all", args: nil},
+		{name: "duplicate duration", args: []string{"1s", "2s"}},
+		{name: "missing release value", args: []string{"--release-on"}},
+		{name: "empty release value", args: []string{"--release-on="}},
+		{name: "missing source", args: []string{"--release-on", "signal:"}},
+		{name: "unknown type", args: []string{"--release-on", "term:TERM"}},
+		{name: "unknown signal", args: []string{"--release-on", "signal:TERM"}},
+		{name: "lowercase type", args: []string{"--release-on", "Signal:USR1"}},
+		{name: "lowercase source", args: []string{"--release-on", "signal:usr1"}},
+		{name: "extra separator", args: []string{"--release-on", "signal:USR1:extra"}},
+		{name: "version with release", args: []string{"--version", "--release-on", "signal:USR1"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseConfig(test.args); err == nil {
+				t.Fatal("parseConfig unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestForwardReleasesOnInjectedEventBeforeFirstInput(t *testing.T) {
+	input := &firstReadGate{
+		data:    []byte("event-opened"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	event := make(chan struct{})
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	status := make(chan error, 1)
+	go func() {
+		status <- forward(input, output, nil, event)
+	}()
+
+	select {
+	case <-input.started:
+	case <-time.After(time.Second):
+		t.Fatal("forward did not attempt the first read")
+	}
+	close(event)
+	select {
+	case <-output.writeTimes:
+		t.Fatal("output was written before the first read completed")
+	default:
+	}
+	close(input.release)
+
+	select {
+	case err := <-status:
+		if err != nil {
+			t.Fatalf("forward returned error: %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not complete after injected release")
+	}
+	if got, want := output.String(), "event-opened"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestForwardWaitsForInjectedEventAfterDataEOF(t *testing.T) {
+	input := eofReader{data: []byte("held until event")}
+	event := make(chan struct{})
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	status := make(chan error, 1)
+	go func() {
+		status <- forward(input, output, nil, event)
+	}()
+
+	select {
+	case <-output.writeTimes:
+		t.Fatal("EOF released data before the event")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(event)
+
+	select {
+	case err := <-status:
+		if err != nil {
+			t.Fatalf("forward returned error: %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not complete after injected release")
+	}
+	if got, want := output.String(), "held until event"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestForwardExitsOnEmptyEOFWithoutWaitingForInjectedEvent(t *testing.T) {
+	event := make(chan struct{})
+	var output bytes.Buffer
+	status := make(chan error, 1)
+	go func() {
+		status <- forward(strings.NewReader(""), &output, nil, event)
+	}()
+
+	select {
+	case err := <-status:
+		if err != nil {
+			t.Fatalf("forward returned error: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("empty EOF waited for injected release")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("empty input produced output: %q", output.String())
+	}
+}
+
+func TestForwardUsesEarlierOfDurationAndInjectedEvent(t *testing.T) {
+	delay := time.Second
+	input := eofReader{data: []byte("released")}
+	event := make(chan struct{})
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	status := make(chan error, 1)
+	startedAt := time.Now()
+	go func() {
+		status <- forward(input, output, &delay, event)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(event)
+	select {
+	case wroteAt := <-output.writeTimes:
+		if elapsed := wroteAt.Sub(startedAt); elapsed >= delay {
+			t.Fatalf("event release took %s, want less than %s", elapsed, delay)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("event did not release output")
+	}
+	if err := <-status; err != nil {
+		t.Fatalf("forward returned error: %v", err)
+	}
+}
+
+func TestForwardFlushesWhenTimerIsReadyBeforeReadResult(t *testing.T) {
+	delay := 100 * time.Millisecond
+	input := &timerReadReader{
+		secondStarted: make(chan struct{}),
+		secondRelease: make(chan struct{}),
+		thirdStarted:  make(chan time.Time, 1),
+	}
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 2)}
+	status := make(chan error, 1)
+	go func() {
+		status <- forward(input, output, &delay, nil)
+	}()
+
+	select {
+	case <-input.secondStarted:
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not start its pre-release read")
+	}
+	time.Sleep(2 * delay)
+	close(input.secondRelease)
+
+	var wroteAt time.Time
+	select {
+	case wroteAt = <-output.writeTimes:
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not flush after timer and read became ready")
+	}
+	select {
+	case thirdStartedAt := <-input.thirdStarted:
+		if thirdStartedAt.Before(wroteAt) {
+			t.Fatalf("started a post-release read at %s before flushing held data at %s", thirdStartedAt, wroteAt)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not continue reading after release")
+	}
+	if err := <-status; err != nil {
+		t.Fatalf("forward returned error: %v", err)
+	}
+	if got, want := output.String(), "abc"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
 func TestRunRejectsInvalidArguments(t *testing.T) {
 	tests := []struct {
 		name string
@@ -588,6 +805,33 @@ func fillLimit(p []byte, value byte, limit int) int {
 type postReleaseReader struct {
 	release chan struct{}
 	reads   int
+}
+
+type timerReadReader struct {
+	secondStarted chan struct{}
+	secondRelease chan struct{}
+	thirdStarted  chan time.Time
+	reads         int
+}
+
+func (r *timerReadReader) Read(p []byte) (int, error) {
+	r.reads++
+	switch r.reads {
+	case 1:
+		p[0] = 'a'
+		return 1, nil
+	case 2:
+		close(r.secondStarted)
+		<-r.secondRelease
+		p[0] = 'b'
+		return 1, nil
+	case 3:
+		r.thirdStarted <- time.Now()
+		p[0] = 'c'
+		return 1, io.EOF
+	default:
+		return 0, io.EOF
+	}
 }
 
 func (r *postReleaseReader) Read(p []byte) (int, error) {

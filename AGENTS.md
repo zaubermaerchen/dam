@@ -2,22 +2,28 @@
 
 ## プロジェクト概要
 
-`dam` は Unix パイプラインの起動ゲートです。現在の CLI は `dam DURATION` と単独指定の `dam --version` を受け付けます。`DURATION` モードでは stdin の最初の非空 read が完了した時点から遅延を開始し、指定時間が経過するまでは stdout にストリームデータを書かず、解放後はゲートを再び閉じずにそのまま転送します。`--version` は stdin を読まずにバージョンを stdout へ出力します。
+`dam` は Unix パイプラインの起動ゲートです。現在の CLI は `dam DURATION`、`dam [DURATION] --release-on signal:USR1`（`SIGUSR1` も同義）、単独指定の `dam --version` を受け付けます。`DURATION` モードでは stdin の最初の非空 read が完了した時点から遅延を開始し、指定時間が経過するまでは stdout にストリームデータを書かず、解放後はゲートを再び閉じずにそのまま転送します。signal モードでは、引数検証後かつ最初の read 前から SIGUSR1 を監視し、受信するとゲートを開きます。`--version` は stdin を読まずにバージョンを stdout へ出力します。
 
 現在の実装では、次の契約を維持してください。
 
-- `DURATION` は `time.ParseDuration` 互換とし、`0s` は即時転送、負値、欠落、余分な引数、不正値はエラーとします。
+- 指定した `DURATION` は `time.ParseDuration` 互換とし、`0s` は即時転送、負値、不正値はエラーとします。duration は省略できますが、その場合は release condition が少なくとも一つ必要です。余分な引数はエラーとします。
+- `--release-on TYPE:SOURCE` は反復指定でき、duration と release condition は順序非依存です。`--release-on signal:USR1` と `--release-on=signal:USR1` の分離・`=` 両形式を受理します。duration は最大1個で、少なくとも duration または release condition の一つを必要とします。現在は `signal:USR1` と `signal:SIGUSR1` のみを受理し、内部では SIGUSR1 に正規化します。その他の type・signal 名・大文字小文字違い・不正形式はエラーとします。
 - `--version` は単独指定時に `dam <version>\n` を stdout へ出力して終了し、開発時の既定値は `dev` とします。リリースビルドでは `main.version` をリンク時に差し替えます。余分な引数付きの `--version` はエラーです。
 - EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。
+- SIGUSR1 は最初の入力前から監視します。空 stdin の EOF は signal を待たず正常終了し、データ受信後の EOF は duration または signal による解放までデータを保持します。duration と signal は OR 条件で、一度開いたゲートは再び閉じません。
+- 解放後も設定済みの SIGUSR1 をプロセス終了まで捕捉・無視し、duration または `0s` が先に解放した場合も後続 signal でプロセスを終了させません。Windows その他の未対応環境では signal 設定を明示的な引数エラーとして拒否します。
 - 入力をバイナリを含め byte-for-byte で保持し、stdout はストリームデータ専用、診断は stderr 専用とします。
 - 解放前に保持するストリームデータは実装内部の有界バッファに保持し、空き容量までは短い read も集約し、満杯後は通常のパイプのバックプレッシャーを利用します。バッファ容量は公開契約ではなく、現在の `preReleaseBufferSize` も内部実装詳細として扱います。
 - タイマー待機中に stdin read がブロックしても、解放時刻に保持済みデータを書き出せる構造を維持します。進行中の read が返したデータは順序を崩さず、その後に転送します。
-- 外部解放イベント、繰り返すゲート遷移、設定可能なバッファ、ディスクへの退避、initially-open モードは現在の対象外です。
+- SIGUSR1 以外の外部解放イベント、繰り返すゲート遷移、設定可能なバッファ、ディスクへの退避、initially-open モードは現在の対象外です。
 
 ## リポジトリ構成
 
-- `cmd/dam/main.go`: 引数検証、遅延ゲート、stdin/stdout 転送、終了コードを担当します。
+- `cmd/dam/main.go`: 引数検証、遅延・注入 release ゲート、stdin/stdout 転送、終了コードを担当します。
+- `cmd/dam/release_signal_unix.go`: Unix の SIGUSR1 監視と、解放後も signal を捕捉し続けるライフサイクルを担当します。
+- `cmd/dam/release_signal_windows.go` / `cmd/dam/release_signal_unsupported.go`: 未対応環境で signal 設定を拒否しつつ duration/version のビルドを維持します。
 - `cmd/dam/main_test.go`: 時刻、EOF、バイナリ保持、バックプレッシャー、解放後転送、引数、I/O エラーの契約を固定します。
+- `cmd/dam/main_signal_unix_test.go`: プロセス分離した実 SIGUSR1 配線と、解放後 signal の無害化を固定します。
 - `.github/workflows/ci.yml`: Ubuntu、macOS、Windows で test/vet を実行し、Ubuntu で race test を実行します。
 - `.github/workflows/release.yml`: Linux、macOS、Windows の amd64/arm64 向け成果物を作成します。
 

@@ -1,6 +1,6 @@
 package main
 
-// This file implements the dam command's delayed stdin-to-stdout forwarding.
+// This file implements dam's version reporting and delayed stdin-to-stdout forwarding.
 
 import (
 	"fmt"
@@ -11,11 +11,21 @@ import (
 
 const preReleaseBufferSize = 64 * 1024
 
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 func run(args []string, input io.Reader, output, diagnostics io.Writer) int {
+	if len(args) == 1 && args[0] == "--version" {
+		if err := writeAll(output, []byte(fmt.Sprintf("dam %s\n", version))); err != nil {
+			writeDiagnostic(diagnostics, err)
+			return 1
+		}
+		return 0
+	}
+
 	delay, err := parseDelay(args)
 	if err != nil {
 		writeDiagnostic(diagnostics, err)

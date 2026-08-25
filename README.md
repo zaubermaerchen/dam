@@ -2,7 +2,8 @@
 
 `dam` is a startup gate for Unix pipelines. It starts a timer when the first
 byte arrives on standard input, holds the beginning of the stream for the
-requested duration, and then forwards the stream unchanged.
+requested duration, and then forwards the stream unchanged. It also reports
+its version without reading standard input.
 
 ```text
 producer | dam 3s | consumer
@@ -20,6 +21,7 @@ go build -o dam ./cmd/dam
 
 ```text
 dam DURATION
+dam --version
 ```
 
 `DURATION` uses Go's `time.ParseDuration` syntax, for example `500ms`, `3s`,
@@ -31,6 +33,9 @@ printf 'hello' | ./dam 3s
 
 `0s` is valid and forwards input immediately. Missing, extra, malformed, and
 negative durations are errors.
+
+`--version` is valid only as the sole argument and prints `dam <version>\n`.
+Development builds use `dev`; release builds replace the version at link time.
 
 ## Stream behavior
 
@@ -49,9 +54,10 @@ negative durations are errors.
 
 ## Current scope
 
-The current implementation provides one duration-based, one-way gate. External
-release events, repeated gate transitions, configurable buffer sizes,
-spill-to-disk behavior, and an initially-open mode are not implemented.
+The current implementation provides one duration-based, one-way gate and
+version reporting. External release events, repeated gate transitions,
+configurable buffer sizes, spill-to-disk behavior, and an initially-open mode
+are not implemented.
 
 ## Development
 

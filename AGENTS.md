@@ -2,11 +2,12 @@
 
 ## プロジェクト概要
 
-`dam` は Unix パイプラインの起動ゲートです。現在の CLI は `dam DURATION` のみを受け付け、stdin の最初の非空 read が完了した時点から遅延を開始します。指定時間が経過するまでは stdout にストリームデータを書かず、解放後はゲートを再び閉じずにそのまま転送します。
+`dam` は Unix パイプラインの起動ゲートです。現在の CLI は `dam DURATION` と単独指定の `dam --version` を受け付けます。`DURATION` モードでは stdin の最初の非空 read が完了した時点から遅延を開始し、指定時間が経過するまでは stdout にストリームデータを書かず、解放後はゲートを再び閉じずにそのまま転送します。`--version` は stdin を読まずにバージョンを stdout へ出力します。
 
 現在の実装では、次の契約を維持してください。
 
 - `DURATION` は `time.ParseDuration` 互換とし、`0s` は即時転送、負値、欠落、余分な引数、不正値はエラーとします。
+- `--version` は単独指定時に `dam <version>\n` を stdout へ出力して終了し、開発時の既定値は `dev` とします。リリースビルドでは `main.version` をリンク時に差し替えます。余分な引数付きの `--version` はエラーです。
 - EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。
 - 入力をバイナリを含め byte-for-byte で保持し、stdout はストリームデータ専用、診断は stderr 専用とします。
 - 解放前に保持するストリームデータは実装内部の有界バッファに保持し、空き容量までは短い read も集約し、満杯後は通常のパイプのバックプレッシャーを利用します。バッファ容量は公開契約ではなく、現在の `preReleaseBufferSize` も内部実装詳細として扱います。
@@ -20,7 +21,7 @@
 - `.github/workflows/ci.yml`: Ubuntu、macOS、Windows で test/vet を実行し、Ubuntu で race test を実行します。
 - `.github/workflows/release.yml`: Linux、macOS、Windows の amd64/arm64 向け成果物を作成します。
 
-release workflow は現在 `main.version` の注入と `dam --version` を前提にしていますが、CLI 実装には `--version` がまだありません。これは既知の不整合です。ストリーム機能の変更へ便乗して追加せず、専用の変更として扱ってください。
+release workflow は `main.version` を注入してビルドし、Linux amd64 の成果物で `dam --version` の出力を確認します。
 
 ## サブエージェントの利用
 

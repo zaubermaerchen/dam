@@ -101,10 +101,14 @@ func readFirst(input io.Reader, buffer []byte) (int, error) {
 
 func forwardDelayed(input io.Reader, output io.Writer, timer *time.Timer, held []byte, heldN int) error {
 	timerC := timer.C
+	readRequests := make(chan []byte)
+	readResults := make(chan readResult, 1)
+	go readWorker(input, readRequests, readResults)
+	defer close(readRequests)
+
 	for heldN < len(held) {
 		readBuffer := held[heldN:]
-		readDone := make(chan readResult, 1)
-		go readInto(input, readBuffer, readDone)
+		readRequests <- readBuffer
 
 		select {
 		case <-timerC:
@@ -112,8 +116,8 @@ func forwardDelayed(input io.Reader, output io.Writer, timer *time.Timer, held [
 			if err := writeAll(output, held[:heldN]); err != nil {
 				return err
 			}
-			return forwardReadResult(input, output, readBuffer, <-readDone)
-		case result := <-readDone:
+			return forwardReadResult(input, output, readBuffer, <-readResults)
+		case result := <-readResults:
 			heldN += result.n
 			if result.err != nil {
 				if timerC != nil {
@@ -131,7 +135,7 @@ func forwardDelayed(input io.Reader, output io.Writer, timer *time.Timer, held [
 
 			// If the timer became ready with the read result, release without
 			// starting another read. Otherwise, the next iteration uses the
-			// next unused tail of the fixed buffer.
+			// next unused tail of the bounded buffer.
 			select {
 			case <-timerC:
 				timerC = nil
@@ -155,13 +159,21 @@ func forwardDelayed(input io.Reader, output io.Writer, timer *time.Timer, held [
 	return err
 }
 
-func readInto(input io.Reader, buffer []byte, readDone chan<- readResult) {
+func readWorker(input io.Reader, requests <-chan []byte, results chan<- readResult) {
+	// The buffered result lets a completed Read report back after an output
+	// error, while the request channel is closed by the caller. Generic readers
+	// cannot be canceled, so this avoids leaving the worker blocked on send.
+	for buffer := range requests {
+		results <- readInto(input, buffer)
+	}
+}
+
+func readInto(input io.Reader, buffer []byte) readResult {
 	n, err := input.Read(buffer)
 	if n < 0 || n > len(buffer) {
-		readDone <- readResult{err: fmt.Errorf("invalid input read count %d", n)}
-		return
+		return readResult{err: fmt.Errorf("invalid input read count %d", n)}
 	}
-	readDone <- readResult{n: n, err: err}
+	return readResult{n: n, err: err}
 }
 
 func forwardReadResult(input io.Reader, output io.Writer, readBuffer []byte, result readResult) error {

@@ -231,7 +231,6 @@ func TestRunAppliesBackpressureBeforeRelease(t *testing.T) {
 
 func TestRunBoundsPreReleaseReadAhead(t *testing.T) {
 	const delay = 200 * time.Millisecond
-	const maxPreReleaseBufferSize = 64 * 1024
 	input := &boundedReadReader{
 		calls:   make(chan int, 4),
 		release: make(chan struct{}),
@@ -252,8 +251,8 @@ func TestRunBoundsPreReleaseReadAhead(t *testing.T) {
 			t.Fatal("run did not fill its pre-release read-ahead")
 		}
 	}
-	if bytesRead > maxPreReleaseBufferSize {
-		t.Fatalf("read %d bytes before release, want at most %d", bytesRead, maxPreReleaseBufferSize)
+	if bytesRead > preReleaseBufferSize {
+		t.Fatalf("read %d bytes before release, want at most %d", bytesRead, preReleaseBufferSize)
 	}
 	select {
 	case <-output.writeTimes:
@@ -281,7 +280,7 @@ func TestRunBoundsPreReleaseReadAhead(t *testing.T) {
 	}
 }
 
-func TestRunFillsFixedPreReleaseBufferWithFragmentedReads(t *testing.T) {
+func TestRunFillsBoundedPreReleaseBufferWithFragmentedReads(t *testing.T) {
 	const delay = 2 * time.Second
 	const fragmentedReadSize = 1024
 	const readCount = preReleaseBufferSize / fragmentedReadSize
@@ -321,7 +320,7 @@ func TestRunFillsFixedPreReleaseBufferWithFragmentedReads(t *testing.T) {
 	select {
 	case <-output.writeTimes:
 	case <-time.After(2 * delay):
-		t.Fatal("run did not release the fixed pre-release buffer")
+		t.Fatal("run did not release the bounded pre-release buffer")
 	}
 	input.unblock()
 

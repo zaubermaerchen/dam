@@ -40,9 +40,8 @@ negative durations are errors.
 - EOF does not open the gate early. Data received before EOF is still held until
   the requested release time.
 - Input is preserved byte-for-byte, including binary data.
-- Before release, stream data is held in a bounded in-memory buffer. Once the
-  implementation cannot accept more data, ordinary pipe backpressure limits
-  the producer.
+- Before release, stream data is held in a bounded internal buffer. Once that
+  buffer is full, ordinary pipe backpressure limits the producer.
 - After release, the gate stays open and subsequent input is passed through
   without another delay.
 - stdout contains stream data only. Usage messages and I/O errors are written to

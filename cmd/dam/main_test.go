@@ -38,6 +38,8 @@ Options:
         Supported conditions:
           signal:USR1, signal:SIGUSR1
               Release on SIGUSR1 (supported Unix platforms only).
+          signal:USR2, signal:SIGUSR2
+              Release on SIGUSR2 (supported Unix platforms only).
 
   -h, --help
         Show this help and exit.
@@ -586,6 +588,38 @@ func TestParseConfigAcceptsSignalWithoutDuration(t *testing.T) {
 	}
 	if got, want := config.signals, []string{"SIGUSR1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestParseConfigAcceptsUSR2AliasesAndPreservesOrder(t *testing.T) {
+	config, err := parseConfig([]string{
+		"--release-on=signal:USR2",
+		"250ms",
+		"--release-on",
+		"signal:SIGUSR2",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if config.delay == nil || *config.delay != 250*time.Millisecond {
+		t.Fatalf("delay = %v, want 250ms", config.delay)
+	}
+	if got, want := config.signals, []string{"SIGUSR2", "SIGUSR2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestParseConfigRejectsInvalidUSR2Conditions(t *testing.T) {
+	for _, value := range []string{
+		"signal:usr2",
+		"signal:SigUSR2",
+		"signal:SIGUSR2:extra",
+	} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := parseConfig([]string{"--release-on", value}); err == nil {
+				t.Fatal("parseConfig unexpectedly succeeded")
+			}
+		})
 	}
 }
 

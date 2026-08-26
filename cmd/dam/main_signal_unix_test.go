@@ -2,8 +2,8 @@
 
 package main
 
-// This file verifies real SIGUSR1 wiring in subprocesses so signal delivery
-// does not race with other tests running in the parent test process.
+// This file verifies real SIGUSR1/SIGUSR2 wiring in subprocesses so signal
+// delivery does not race with other tests running in the parent test process.
 
 import (
 	"bufio"
@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -45,6 +46,257 @@ func TestRunSignalSubprocessReleasesBeforeFirstInput(t *testing.T) {
 		t.Fatalf("send post-release SIGUSR1: %v", err)
 	}
 	helper.finish(t)
+}
+
+func TestRunSignalSubprocessReleasesHeldDataOnUSR2(t *testing.T) {
+	helper := startSignalHelper(t, "usr2-held")
+	defer helper.cleanup()
+
+	select {
+	case <-helper.ready:
+	case <-time.After(testTimeout):
+		t.Fatal("helper did not install its signal monitor")
+	}
+	if _, err := io.WriteString(helper.stdin, "held"); err != nil {
+		t.Fatalf("write held input: %v", err)
+	}
+	select {
+	case value := <-helper.output:
+		t.Fatalf("held input was released before SIGUSR2: %q", string([]byte{value}))
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := helper.signal(syscall.SIGUSR2); err != nil {
+		t.Fatalf("send SIGUSR2: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("held")); got != "held" {
+		t.Fatalf("held output = %q, want %q", got, "held")
+	}
+	if _, err := io.WriteString(helper.stdin, "after"); err != nil {
+		t.Fatalf("write post-release input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("after")); got != "after" {
+		t.Fatalf("post-release output = %q, want %q", got, "after")
+	}
+	helper.finish(t)
+}
+
+func TestRunSignalSubprocessReleasesOnUSR2BeforeFirstInput(t *testing.T) {
+	helper := startSignalHelper(t, "usr2-preinput")
+	defer helper.cleanup()
+
+	select {
+	case <-helper.ready:
+	case <-time.After(testTimeout):
+		t.Fatal("helper did not install its signal monitor")
+	}
+	if err := helper.signal(syscall.SIGUSR2); err != nil {
+		t.Fatalf("send pre-input SIGUSR2: %v", err)
+	}
+	if _, err := io.WriteString(helper.stdin, "first"); err != nil {
+		t.Fatalf("write first input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("first")); got != "first" {
+		t.Fatalf("first output = %q, want %q", got, "first")
+	}
+	if _, err := io.WriteString(helper.stdin, "second"); err != nil {
+		t.Fatalf("write second input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("second")); got != "second" {
+		t.Fatalf("second output = %q, want %q", got, "second")
+	}
+	helper.finish(t)
+}
+
+func TestRunSignalSubprocessSupportsEitherConfiguredSignal(t *testing.T) {
+	tests := []struct {
+		name    string
+		release os.Signal
+	}{
+		{name: "SIGUSR1", release: syscall.SIGUSR1},
+		{name: "SIGUSR2", release: syscall.SIGUSR2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			helper := startSignalHelper(t, "both-held")
+			defer helper.cleanup()
+
+			select {
+			case <-helper.ready:
+			case <-time.After(testTimeout):
+				t.Fatal("helper did not install its signal monitor")
+			}
+			if _, err := io.WriteString(helper.stdin, "held"); err != nil {
+				t.Fatalf("write held input: %v", err)
+			}
+			select {
+			case value := <-helper.output:
+				t.Fatalf("held input was released before a configured signal: %q", string([]byte{value}))
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err := helper.signal(test.release); err != nil {
+				t.Fatalf("send %s: %v", test.release, err)
+			}
+			if got := readExactWithTimeout(t, helper.output, len("held")); got != "held" {
+				t.Fatalf("held output = %q, want %q", got, "held")
+			}
+			for _, sig := range []os.Signal{syscall.SIGUSR1, syscall.SIGUSR2} {
+				if err := helper.signal(sig); err != nil {
+					t.Fatalf("send post-release %s: %v", sig, err)
+				}
+			}
+			if _, err := io.WriteString(helper.stdin, "after"); err != nil {
+				t.Fatalf("write post-release input: %v", err)
+			}
+			if got := readExactWithTimeout(t, helper.output, len("after")); got != "after" {
+				t.Fatalf("post-release output = %q, want %q", got, "after")
+			}
+			helper.finish(t)
+		})
+	}
+}
+
+func TestRunSignalSubprocessUSR2WinsBeforeDuration(t *testing.T) {
+	helper := startSignalHelper(t, "long-duration-usr2")
+	defer helper.cleanup()
+
+	select {
+	case <-helper.ready:
+	case <-time.After(testTimeout):
+		t.Fatal("helper did not install its signal monitor")
+	}
+	if _, err := io.WriteString(helper.stdin, "held"); err != nil {
+		t.Fatalf("write held input: %v", err)
+	}
+	select {
+	case value := <-helper.output:
+		t.Fatalf("held input was released before SIGUSR2: %q", string([]byte{value}))
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := helper.signal(syscall.SIGUSR2); err != nil {
+		t.Fatalf("send SIGUSR2: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("held")); got != "held" {
+		t.Fatalf("held output = %q, want %q", got, "held")
+	}
+	if _, err := io.WriteString(helper.stdin, "after"); err != nil {
+		t.Fatalf("write post-release input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("after")); got != "after" {
+		t.Fatalf("post-release output = %q, want %q", got, "after")
+	}
+	helper.finish(t)
+}
+
+func TestRunSignalSubprocessKeepsUSR2TimerWinnerAlive(t *testing.T) {
+	helper := startSignalHelper(t, "duration-usr2")
+	defer helper.cleanup()
+
+	if _, err := io.WriteString(helper.stdin, "first"); err != nil {
+		t.Fatalf("write first input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("first")); got != "first" {
+		t.Fatalf("first output = %q, want %q", got, "first")
+	}
+	if err := helper.signal(syscall.SIGUSR2); err != nil {
+		t.Fatalf("send post-timer SIGUSR2: %v", err)
+	}
+	if _, err := io.WriteString(helper.stdin, "second"); err != nil {
+		t.Fatalf("write second input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("second")); got != "second" {
+		t.Fatalf("second output = %q, want %q", got, "second")
+	}
+	helper.finish(t)
+}
+
+func TestRunSignalSubprocessKeepsUSR2ZeroDelayWinnerAlive(t *testing.T) {
+	helper := startSignalHelper(t, "zero-usr2")
+	defer helper.cleanup()
+
+	if _, err := io.WriteString(helper.stdin, "first"); err != nil {
+		t.Fatalf("write first input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("first")); got != "first" {
+		t.Fatalf("first output = %q, want %q", got, "first")
+	}
+	if err := helper.signal(syscall.SIGUSR2); err != nil {
+		t.Fatalf("send post-zero-delay SIGUSR2: %v", err)
+	}
+	if _, err := io.WriteString(helper.stdin, "second"); err != nil {
+		t.Fatalf("write second input: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("second")); got != "second" {
+		t.Fatalf("second output = %q, want %q", got, "second")
+	}
+	helper.finish(t)
+}
+
+func TestRunSignalSubprocessDoesNotReleaseOnUnconfiguredUSRSignal(t *testing.T) {
+	tests := []struct {
+		mode       string
+		configured syscall.Signal
+		ignored    syscall.Signal
+	}{
+		{mode: "usr2-only", configured: syscall.SIGUSR2, ignored: syscall.SIGUSR1},
+		{mode: "usr1-only", configured: syscall.SIGUSR1, ignored: syscall.SIGUSR2},
+	}
+	for _, test := range tests {
+		t.Run(test.mode, func(t *testing.T) {
+			helper := startSignalHelper(t, test.mode)
+			defer helper.cleanup()
+
+			select {
+			case <-helper.ready:
+			case <-time.After(testTimeout):
+				t.Fatal("helper did not install its signal monitor")
+			}
+			if err := helper.signal(test.ignored); err != nil {
+				t.Fatalf("send unconfigured %s: %v", test.ignored, err)
+			}
+			if _, err := io.WriteString(helper.stdin, "held"); err != nil {
+				t.Fatalf("write held input: %v", err)
+			}
+			select {
+			case value := <-helper.output:
+				t.Fatalf("unconfigured %s released input: %q", test.ignored, string([]byte{value}))
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err := helper.signal(test.configured); err != nil {
+				t.Fatalf("send configured %s: %v", test.configured, err)
+			}
+			if got := readExactWithTimeout(t, helper.output, len("held")); got != "held" {
+				t.Fatalf("held output = %q, want %q", got, "held")
+			}
+			helper.finish(t)
+		})
+	}
+}
+
+func TestReleaseMonitorResolvesAndDeduplicatesConfiguredSignals(t *testing.T) {
+	signals, err := resolveReleaseSignals([]string{"SIGUSR2", "SIGUSR1", "SIGUSR2"})
+	if err != nil {
+		t.Fatalf("resolveReleaseSignals returned error: %v", err)
+	}
+	if got, want := signals, []os.Signal{syscall.SIGUSR2, syscall.SIGUSR1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestReleaseMonitorRejectsUnknownCanonicalSignal(t *testing.T) {
+	if _, err := resolveReleaseSignals([]string{"SIGUSR3"}); err == nil {
+		t.Fatal("resolveReleaseSignals unexpectedly succeeded")
+	}
+}
+
+func TestReleaseMonitorUsesUniqueSignalCapacity(t *testing.T) {
+	monitor, err := newReleaseMonitor([]string{"SIGUSR2", "SIGUSR1", "SIGUSR2"})
+	if err != nil {
+		t.Fatalf("newReleaseMonitor returned error: %v", err)
+	}
+	t.Cleanup(monitor.Close)
+	if got, want := cap(monitor.signals), 2; got != want {
+		t.Fatalf("signal channel capacity = %d, want %d", got, want)
+	}
 }
 
 func TestRunSignalSubprocessKeepsTimerWinnerAlive(t *testing.T) {
@@ -201,7 +453,7 @@ func TestSignalHelperProcess(t *testing.T) {
 	}
 	os.Args = append([]string{"dam"}, signalHelperArgs(os.Getenv("DAM_SIGNAL_HELPER_MODE"))...)
 	var ready func()
-	if os.Getenv("DAM_SIGNAL_HELPER_MODE") == "preinput" {
+	if os.Getenv("DAM_SIGNAL_HELPER_MODE") != "" {
 		ready = func() { fmt.Fprintln(os.Stderr, "DAM_SIGNAL_READY") }
 	}
 	status, _ := executeWithReady(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, ready)
@@ -212,10 +464,22 @@ func signalHelperArgs(mode string) []string {
 	switch mode {
 	case "preinput":
 		return []string{"--release-on=signal:USR1"}
+	case "usr2-preinput", "usr2-held", "usr2-only":
+		return []string{"--release-on=signal:USR2"}
+	case "usr1-only":
+		return []string{"--release-on=signal:USR1"}
+	case "both-held":
+		return []string{"--release-on=signal:USR1", "--release-on=signal:USR2"}
 	case "duration":
 		return []string{"100ms", "--release-on=signal:USR1"}
 	case "zero":
 		return []string{"0s", "--release-on=signal:USR1"}
+	case "duration-usr2":
+		return []string{"100ms", "--release-on=signal:USR2"}
+	case "long-duration-usr2":
+		return []string{"1h", "--release-on=signal:USR2"}
+	case "zero-usr2":
+		return []string{"0s", "--release-on=signal:USR2"}
 	default:
 		panic("unknown signal helper mode")
 	}

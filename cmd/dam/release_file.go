@@ -193,25 +193,17 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 	}
 
 	results := make(chan fileProbeResult, len(monitor.paths))
-	for _, path := range monitor.paths {
+	for index, path := range monitor.paths {
 		go func() {
 			ready, err := monitor.probe(path)
 			if errors.Is(err, fs.ErrNotExist) {
 				ready, err = false, nil
 			}
-			results <- fileProbeResult{ready: ready, err: err}
+			results <- fileProbeResult{index: index, ready: ready, err: err}
 		}()
 	}
 
-	var firstFatal error
-	var anyReady bool
-	for range monitor.paths {
-		result := <-results
-		if result.err != nil && firstFatal == nil {
-			firstFatal = result.err
-		}
-		anyReady = anyReady || result.ready
-	}
+	firstFatal, anyReady := collectInitialFileProbeResults(results, len(monitor.paths))
 	if firstFatal != nil {
 		coordinator.reportFatal(firstFatal)
 	}
@@ -238,8 +230,24 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 }
 
 type fileProbeResult struct {
+	index int
 	ready bool
 	err   error
+}
+
+func collectInitialFileProbeResults(results <-chan fileProbeResult, count int) (firstFatal error, anyReady bool) {
+	orderedResults := make([]fileProbeResult, count)
+	for range count {
+		result := <-results
+		orderedResults[result.index] = result
+	}
+	for _, result := range orderedResults {
+		if result.err != nil && firstFatal == nil {
+			firstFatal = result.err
+		}
+		anyReady = anyReady || result.ready
+	}
+	return firstFatal, anyReady
 }
 
 func (m *fileMonitor) Close() {

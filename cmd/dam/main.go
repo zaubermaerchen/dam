@@ -4,6 +4,7 @@ package main
 // coordination, and delayed stdin-to-stdout forwarding.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,6 +48,8 @@ Options:
 `
 
 var version = "dev"
+
+var errReleaseFailureChannelClosed = errors.New("internal error: release failure channel closed")
 
 func main() {
 	// Keep the signal monitor registered until os.Exit so a configured SIGUSR1
@@ -256,7 +259,10 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 
 	for {
 		select {
-		case err := <-failures:
+		case err, ok := <-failures:
+			if !ok {
+				return errReleaseFailureChannelClosed
+			}
 			if err != nil {
 				return err
 			}
@@ -334,7 +340,10 @@ func forwardHeldUntilRelease(output io.Writer, timerC <-chan time.Time, release 
 func forwardHeldUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error, held []byte, heldN int, readErr error) error {
 	if timerC != nil || release != nil || failures != nil {
 		select {
-		case err := <-failures:
+		case err, ok := <-failures:
+			if !ok {
+				return errReleaseFailureChannelClosed
+			}
 			if err != nil {
 				return err
 			}
@@ -392,7 +401,10 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 		// completed. This keeps a completed pre-release read from starting
 		// another read.
 		select {
-		case err := <-failures:
+		case err, ok := <-failures:
+			if !ok {
+				return errReleaseFailureChannelClosed
+			}
 			if err != nil {
 				return err
 			}
@@ -400,7 +412,10 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 			haveRead = true
 		default:
 			select {
-			case err := <-failures:
+			case err, ok := <-failures:
+				if !ok {
+					return errReleaseFailureChannelClosed
+				}
 				if err != nil {
 					return err
 				}
@@ -425,7 +440,7 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 			}
 		}
 		if !haveRead {
-			return nil
+			return errReleaseFailureChannelClosed
 		}
 
 		heldN += result.n
@@ -474,7 +489,10 @@ func failureReady(failures <-chan error) error {
 		return nil
 	}
 	select {
-	case err := <-failures:
+	case err, ok := <-failures:
+		if !ok {
+			return errReleaseFailureChannelClosed
+		}
 		return err
 	default:
 		return nil
@@ -496,7 +514,10 @@ func waitForRelease(timerC <-chan time.Time, release <-chan struct{}, failures <
 		return err
 	}
 	select {
-	case err := <-failures:
+	case err, ok := <-failures:
+		if !ok {
+			return errReleaseFailureChannelClosed
+		}
 		if err != nil {
 			return err
 		}

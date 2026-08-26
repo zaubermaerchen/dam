@@ -549,6 +549,111 @@ func TestInitialRegularFileOpensBeforeFirstStdinRead(t *testing.T) {
 	}
 }
 
+func TestCollectInitialFileProbeResultsUsesConfiguredPathOrder(t *testing.T) {
+	firstFatal := errors.New("first fatal")
+	secondFatal := errors.New("second fatal")
+	results := make(chan fileProbeResult, 2)
+	results <- fileProbeResult{index: 1, err: secondFatal}
+	results <- fileProbeResult{index: 0, err: firstFatal}
+
+	first, anyReady := collectInitialFileProbeResults(results, 2)
+	if !errors.Is(first, firstFatal) {
+		t.Fatalf("initial fatal = %v, want configured-first error %v", first, firstFatal)
+	}
+	if errors.Is(first, secondFatal) {
+		t.Fatalf("initial fatal = %v, selected later configured path", first)
+	}
+	if anyReady {
+		t.Fatal("initial results reported a ready file without a ready result")
+	}
+}
+
+func TestInitialFileProbesStartInParallel(t *testing.T) {
+	coordinator := newReleaseCoordinator(true)
+	paths := []string{"first", "second", "third"}
+	started := make(chan string, len(paths))
+	allowProbes := make(chan struct{})
+	var unblockOnce sync.Once
+	unblock := func() {
+		unblockOnce.Do(func() { close(allowProbes) })
+	}
+	t.Cleanup(func() {
+		unblock()
+		coordinator.stopFiles()
+	})
+
+	probe := func(path string) (bool, error) {
+		started <- path
+		<-allowProbes
+		return false, nil
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := newFileMonitorWithProbe(paths, coordinator, probe, time.Millisecond)
+		result <- err
+	}()
+	for range paths {
+		select {
+		case <-started:
+		case <-time.After(testTimeout):
+			t.Fatal("initial file probes did not all start before the release barrier")
+		}
+	}
+	coordinator.stopFiles()
+	unblock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("initial file probes did not complete after the release barrier")
+	}
+}
+
+func TestForwardDelayedReportsClosedFailureChannel(t *testing.T) {
+	started := make(chan struct{})
+	allowRead := make(chan struct{})
+	var unblockOnce sync.Once
+	unblock := func() {
+		unblockOnce.Do(func() { close(allowRead) })
+	}
+	t.Cleanup(unblock)
+	input := readerFunc(func([]byte) (int, error) {
+		close(started)
+		<-allowRead
+		return 1, nil
+	})
+	failures := make(chan error)
+	var output bytes.Buffer
+	status := make(chan error, 1)
+	held := []byte("heldx")
+	go func() {
+		status <- forwardDelayedWithFailure(input, &output, nil, nil, failures, nil, nil, held, len("held"))
+	}()
+	select {
+	case <-started:
+	case <-time.After(testTimeout):
+		t.Fatal("blocking reader did not start")
+	}
+	close(failures)
+	var err error
+	select {
+	case err = <-status:
+	case <-time.After(testTimeout):
+		t.Fatal("forwardDelayed did not report the closed failure channel")
+	}
+	if err == nil {
+		t.Fatal("closed failure channel returned silent success")
+	}
+	if !errors.Is(err, errReleaseFailureChannelClosed) {
+		t.Fatalf("closed failure channel error = %v, want %v", err, errReleaseFailureChannelClosed)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("closed failure channel wrote held data: %q", output.String())
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false

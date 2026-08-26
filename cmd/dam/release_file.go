@@ -130,6 +130,15 @@ func (c *releaseCoordinator) stopFilesLocked() {
 	close(c.files)
 }
 
+// beginFileProbe reserves a probe while holding the same mutex used to stop
+// monitoring. A true result means the probe may already be in flight; a later
+// OPEN/EOF transition does not wait for it and its result is ignored.
+func (c *releaseCoordinator) beginFileProbe() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.filesStopped
+}
+
 func (c *releaseCoordinator) fatalError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -220,6 +229,9 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 	}
 
 	for _, path := range monitor.paths {
+		if monitoringStopped(coordinator.files) {
+			break
+		}
 		go monitor.watchPath(path)
 	}
 	return monitor, nil
@@ -239,12 +251,27 @@ func (m *fileMonitor) Close() {
 func (m *fileMonitor) watchPath(path string) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
+	m.watchPathWithTicks(path, ticker.C, nil)
+}
+
+func (m *fileMonitor) watchPathWithTicks(path string, ticks <-chan time.Time, beforeProbe func()) {
+	if monitoringStopped(m.coordinator.files) {
+		return
+	}
 
 	for {
 		select {
 		case <-m.coordinator.files:
 			return
-		case <-ticker.C:
+		case <-ticks:
+			if beforeProbe != nil {
+				beforeProbe()
+			}
+			// Reserve the probe under the coordinator mutex so stopFiles cannot
+			// race between a channel check and the probe call.
+			if !m.coordinator.beginFileProbe() {
+				return
+			}
 			ready, err := m.probe(path)
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -258,5 +285,14 @@ func (m *fileMonitor) watchPath(path string) {
 				return
 			}
 		}
+	}
+}
+
+func monitoringStopped(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
 	}
 }

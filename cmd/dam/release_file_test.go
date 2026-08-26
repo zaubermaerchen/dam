@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -398,6 +399,156 @@ func TestReleaseCoordinatorEmptyCompletionStopsAndWinsOverLateFatal(t *testing.T
 	}
 }
 
+func TestFileMonitorSkipsProbeWhenStopArrivesAfterTick(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	ticks := make(chan time.Time, 1)
+	probeCalled := make(chan struct{}, 1)
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		probe: func(string) (bool, error) {
+			probeCalled <- struct{}{}
+			return false, nil
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		monitor.watchPathWithTicks("ready", ticks, func() {
+			coordinator.stopFiles()
+		})
+		close(done)
+	}()
+	ticks <- time.Now()
+
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("watcher did not stop after the tick")
+	}
+	select {
+	case <-probeCalled:
+		t.Fatal("watcher started a probe after file monitoring stopped")
+	default:
+	}
+}
+
+func TestReleaseCoordinatorPreventsProbeReservationAfterStop(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	coordinator.stopFiles()
+	if coordinator.beginFileProbe() {
+		t.Fatal("stopped coordinator reserved a new file probe")
+	}
+}
+
+func TestInitialRegularAndFatalProbeFatalWins(t *testing.T) {
+	coordinator := newReleaseCoordinator(true)
+	fatal := errors.New("initial fatal")
+	var mu sync.Mutex
+	probed := make(map[string]int)
+	probe := func(path string) (bool, error) {
+		mu.Lock()
+		probed[path]++
+		mu.Unlock()
+		if path == "regular" {
+			return true, nil
+		}
+		return false, fatal
+	}
+	monitor, err := newFileMonitorWithProbe([]string{"regular", "fatal"}, coordinator, probe, time.Millisecond)
+	if err == nil || !errors.Is(err, fatal) {
+		t.Fatalf("newFileMonitorWithProbe error = %v, want %v", err, fatal)
+	}
+	if monitor == nil {
+		t.Fatal("newFileMonitorWithProbe returned nil monitor")
+	}
+	select {
+	case <-coordinator.release:
+		t.Fatal("regular initial result opened gate despite fatal result")
+	default:
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range []string{"regular", "fatal"} {
+		if got := probed[path]; got != 1 {
+			t.Fatalf("probe count for %q = %d, want 1", path, got)
+		}
+	}
+}
+
+func TestInitialPendingOpenAndFatalProbeFatalWins(t *testing.T) {
+	coordinator := newReleaseCoordinator(true)
+	fatal := errors.New("fatal after pending signal")
+	probe := func(string) (bool, error) {
+		if err := coordinator.requestOpen(); err != nil {
+			return false, err
+		}
+		return false, fatal
+	}
+	monitor, err := newFileMonitorWithProbe([]string{"fatal"}, coordinator, probe, time.Millisecond)
+	if err == nil || !errors.Is(err, fatal) {
+		t.Fatalf("newFileMonitorWithProbe error = %v, want %v", err, fatal)
+	}
+	if monitor == nil {
+		t.Fatal("newFileMonitorWithProbe returned nil monitor")
+	}
+	select {
+	case <-coordinator.release:
+		t.Fatal("pending open opened gate despite fatal initial probe")
+	default:
+	}
+}
+
+func TestInitialPendingOpenDoesNotSpawnStoppedWatchers(t *testing.T) {
+	coordinator := newReleaseCoordinator(true)
+	var mu sync.Mutex
+	calls := 0
+	probe := func(string) (bool, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		if err := coordinator.requestOpen(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	monitor, err := newFileMonitorWithProbe([]string{"pending"}, coordinator, probe, time.Millisecond)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
+	}
+	defer monitor.Close()
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("probe calls = %d, want only the initial probe", calls)
+	}
+}
+
+func TestInitialRegularFileOpensBeforeFirstStdinRead(t *testing.T) {
+	coordinator := newReleaseCoordinator(true)
+	monitor, err := newFileMonitorWithProbe([]string{"ready"}, coordinator, func(string) (bool, error) {
+		return true, nil
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
+	}
+	defer monitor.Close()
+	readStartedAfterOpen := false
+	input := readerFunc(func([]byte) (int, error) {
+		select {
+		case <-coordinator.release:
+			readStartedAfterOpen = true
+		default:
+		}
+		return 0, io.EOF
+	})
+	if err := forward(input, &bytes.Buffer{}, nil, coordinator.release); err != nil {
+		t.Fatalf("forward returned error: %v", err)
+	}
+	if !readStartedAfterOpen {
+		t.Fatal("first stdin read started before initial regular file opened the gate")
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -408,4 +559,10 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (read readerFunc) Read(buffer []byte) (int, error) {
+	return read(buffer)
 }

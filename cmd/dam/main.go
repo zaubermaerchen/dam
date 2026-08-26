@@ -7,11 +7,40 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
 
 const preReleaseBufferSize = 64 * 1024
+
+const helpText = `Usage:
+  dam DURATION
+  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]...
+  dam --help
+  dam --version
+
+Hold pipeline output until a release condition is met.
+
+Arguments:
+  DURATION
+        Start the release timer after stdin's first non-empty read completes.
+        Uses Go duration syntax, such as 500ms, 3s, or 2m.
+
+Options:
+  --release-on TYPE:SOURCE
+        Release when an external condition is met. May be repeated.
+
+        Supported conditions:
+          signal:USR1, signal:SIGUSR1
+              Release on SIGUSR1 (supported Unix platforms only).
+
+  -h, --help
+        Show this help and exit.
+
+  --version
+        Show version and exit.
+`
 
 var version = "dev"
 
@@ -36,6 +65,14 @@ func execute(args []string, input io.Reader, output, diagnostics io.Writer) (int
 }
 
 func executeWithReady(args []string, input io.Reader, output, diagnostics io.Writer, ready func()) (int, func()) {
+	if slices.Contains(args, "-h") || slices.Contains(args, "--help") {
+		if err := writeAll(output, []byte(helpText)); err != nil {
+			writeDiagnostic(diagnostics, err)
+			return 1, nil
+		}
+		return 0, nil
+	}
+
 	if len(args) == 1 && args[0] == "--version" {
 		if err := writeAll(output, []byte(fmt.Sprintf("dam %s\n", version))); err != nil {
 			writeDiagnostic(diagnostics, err)

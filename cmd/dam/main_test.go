@@ -18,6 +18,34 @@ const (
 	testTimeout    = 5 * time.Second
 )
 
+const expectedHelpText = `Usage:
+  dam DURATION
+  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]...
+  dam --help
+  dam --version
+
+Hold pipeline output until a release condition is met.
+
+Arguments:
+  DURATION
+        Start the release timer after stdin's first non-empty read completes.
+        Uses Go duration syntax, such as 500ms, 3s, or 2m.
+
+Options:
+  --release-on TYPE:SOURCE
+        Release when an external condition is met. May be repeated.
+
+        Supported conditions:
+          signal:USR1, signal:SIGUSR1
+              Release on SIGUSR1 (supported Unix platforms only).
+
+  -h, --help
+        Show this help and exit.
+
+  --version
+        Show version and exit.
+`
+
 func TestRunPreservesBinaryInputWithZeroDelay(t *testing.T) {
 	input := make([]byte, 256*3)
 	for i := range input {
@@ -77,6 +105,112 @@ func TestRunReportsVersionOutputErrors(t *testing.T) {
 	}
 	if !strings.Contains(diagnostics.String(), outputErr.Error()) {
 		t.Fatalf("version diagnostic = %q, want %q", diagnostics.String(), outputErr)
+	}
+}
+
+func TestRunPrintsHelpWithoutReadingInputOrStartingReadiness(t *testing.T) {
+	for _, arg := range []string{"-h", "--help"} {
+		t.Run(arg, func(t *testing.T) {
+			input := &trackingReader{}
+			var output, diagnostics bytes.Buffer
+			ready := false
+			status, cleanup := executeWithReady([]string{arg}, input, &output, &diagnostics, func() {
+				ready = true
+			})
+			if cleanup != nil {
+				t.Fatal("help created a release monitor")
+			}
+			if status != 0 {
+				t.Fatalf("help status = %d, diagnostics = %q", status, diagnostics.String())
+			}
+			if got, want := output.String(), expectedHelpText; got != want {
+				t.Fatalf("help output = %q, want %q", got, want)
+			}
+			if diagnostics.Len() != 0 {
+				t.Fatalf("successful help wrote diagnostics: %q", diagnostics.String())
+			}
+			if input.reads != 0 {
+				t.Fatalf("help read stdin %d times", input.reads)
+			}
+			if ready {
+				t.Fatal("help started release readiness")
+			}
+		})
+	}
+}
+
+func TestRunHelpTakesPriorityOverOtherArguments(t *testing.T) {
+	tests := [][]string{
+		{"--version", "--help"},
+		{"--help", "--version"},
+		{"--unknown", "-h"},
+		{"--release-on", "--help"},
+		{"3s", "--help"},
+		{"-h", "--help"},
+	}
+
+	for index, args := range tests {
+		var output, diagnostics bytes.Buffer
+		input := &trackingReader{}
+		status := run(args, input, &output, &diagnostics)
+		if status != 0 {
+			t.Fatalf("case %d help status = %d, diagnostics = %q", index, status, diagnostics.String())
+		}
+		if diagnostics.Len() != 0 {
+			t.Fatalf("case %d successful help wrote diagnostics: %q", index, diagnostics.String())
+		}
+		if input.reads != 0 {
+			t.Fatalf("case %d help read stdin %d times", index, input.reads)
+		}
+		if got, want := output.String(), expectedHelpText; got != want {
+			t.Fatalf("case %d help output = %q, want %q", index, got, want)
+		}
+	}
+}
+
+func TestRunReportsHelpOutputErrorsWithoutReadingInput(t *testing.T) {
+	outputErr := errors.New("help output failed")
+	input := &trackingReader{}
+	var diagnostics bytes.Buffer
+	ready := false
+	status, cleanup := executeWithReady([]string{"--help"}, input, errorWriter{err: outputErr}, &diagnostics, func() {
+		ready = true
+	})
+	if cleanup != nil {
+		t.Fatal("help created a release monitor after output error")
+	}
+	if status == 0 {
+		t.Fatal("help output error unexpectedly succeeded")
+	}
+	if !strings.Contains(diagnostics.String(), outputErr.Error()) {
+		t.Fatalf("help diagnostic = %q, want %q", diagnostics.String(), outputErr)
+	}
+	if input.reads != 0 {
+		t.Fatalf("help read stdin %d times", input.reads)
+	}
+	if ready {
+		t.Fatal("help started release readiness after output error")
+	}
+}
+
+func TestRunTreatsNearHelpArgumentsAsErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help=x"},
+		{"--release-on=--help"},
+		{"-help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var output, diagnostics bytes.Buffer
+			if status := run(args, strings.NewReader("input"), &output, &diagnostics); status == 0 {
+				t.Fatal("near-help argument unexpectedly succeeded")
+			}
+			if output.Len() != 0 {
+				t.Fatalf("near-help argument wrote stdout: %q", output.String())
+			}
+			if diagnostics.Len() == 0 {
+				t.Fatal("near-help argument produced no stderr diagnostic")
+			}
+		})
 	}
 }
 

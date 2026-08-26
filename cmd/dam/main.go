@@ -34,6 +34,8 @@ Options:
         Supported conditions:
           signal:USR1, signal:SIGUSR1
               Release on SIGUSR1 (supported Unix platforms only).
+          signal:USR2, signal:SIGUSR2
+              Release on SIGUSR2 (supported Unix platforms only).
 
   -h, --help
         Show this help and exit.
@@ -156,10 +158,17 @@ func parseConfig(args []string) (runConfig, error) {
 
 func parseReleaseCondition(value string) (string, error) {
 	typeName, source, ok := strings.Cut(value, ":")
-	if !ok || typeName != "signal" || source != "USR1" && source != "SIGUSR1" {
-		return "", fmt.Errorf("invalid release condition %q: want signal:USR1 or signal:SIGUSR1", value)
+	if !ok || typeName != "signal" {
+		return "", fmt.Errorf("invalid release condition %q: want signal:USR1, signal:SIGUSR1, signal:USR2, or signal:SIGUSR2", value)
 	}
-	return "SIGUSR1", nil
+	switch source {
+	case "USR1", "SIGUSR1":
+		return "SIGUSR1", nil
+	case "USR2", "SIGUSR2":
+		return "SIGUSR2", nil
+	default:
+		return "", fmt.Errorf("invalid release condition %q: want signal:USR1, signal:SIGUSR1, signal:USR2, or signal:SIGUSR2", value)
+	}
 }
 
 func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}) error {

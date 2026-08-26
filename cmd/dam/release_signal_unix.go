@@ -6,8 +6,10 @@ package main
 // continuing to consume later occurrences until the command exits.
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 )
@@ -21,18 +23,41 @@ type releaseMonitor struct {
 }
 
 func newReleaseMonitor(configured []string) (*releaseMonitor, error) {
-	if len(configured) == 0 {
+	effectiveSignals, err := resolveReleaseSignals(configured)
+	if err != nil {
+		return nil, err
+	}
+	if len(effectiveSignals) == 0 {
 		return &releaseMonitor{}, nil
 	}
 
 	monitor := &releaseMonitor{
 		release: make(chan struct{}),
 		done:    make(chan struct{}),
-		signals: make(chan os.Signal, 1),
+		signals: make(chan os.Signal, len(effectiveSignals)),
 	}
-	signal.Notify(monitor.signals, syscall.SIGUSR1)
+	signal.Notify(monitor.signals, effectiveSignals...)
 	go monitor.consumeSignals()
 	return monitor, nil
+}
+
+func resolveReleaseSignals(configured []string) ([]os.Signal, error) {
+	effective := make([]os.Signal, 0, len(configured))
+	for _, canonical := range configured {
+		var signal os.Signal
+		switch canonical {
+		case "SIGUSR1":
+			signal = syscall.SIGUSR1
+		case "SIGUSR2":
+			signal = syscall.SIGUSR2
+		default:
+			return nil, fmt.Errorf("unknown configured release signal %q", canonical)
+		}
+		if !slices.Contains(effective, signal) {
+			effective = append(effective, signal)
+		}
+	}
+	return effective, nil
 }
 
 func (monitor *releaseMonitor) consumeSignals() {

@@ -1,10 +1,10 @@
 # dam
 
 `dam` is a startup gate for Unix pipelines. It starts a timer when the first
-byte arrives on standard input, holds the beginning of the stream for the
-requested duration, and then forwards the stream unchanged. The gate can also
-be opened by `SIGUSR1`. It also reports its version without reading standard
-input.
+non-empty read from standard input completes, holds the beginning of the stream
+for the requested duration, and then forwards the stream unchanged. The gate
+can also be opened by `SIGUSR1`. It also reports its version to stdout without
+reading standard input.
 
 ```text
 producer | dam 3s | consumer
@@ -24,6 +24,8 @@ go build -o dam ./cmd/dam
 dam DURATION
 dam [DURATION] --release-on signal:USR1
 dam [DURATION] --release-on signal:SIGUSR1
+dam -h
+dam --help
 dam --version
 ```
 
@@ -43,8 +45,16 @@ both separated (`--release-on signal:USR1`) and equals
 (`--release-on=signal:USR1`) forms. `signal:USR1` and `signal:SIGUSR1` are
 equivalent; other types, signal names, and casing are invalid.
 
-`--version` is valid only as the sole argument and prints `dam <version>\n`.
-Development builds use `dev`; release builds replace the version at link time.
+`--version` is valid only as the sole argument and prints `dam <version>\n` to
+stdout. Development builds use `dev`; release builds replace the version at
+link time.
+
+`-h` and `--help` are equivalent. An exact help argument takes precedence over
+all other arguments, prints the help text to stdout, and exits successfully
+without reading stdin or starting release monitoring. `--version` also writes
+its informational output to stdout without reading stdin. Forms such as
+`--help=x`, `--release-on=--help`, and `-help` remain ordinary argument errors.
+Argument errors do not print the full help text automatically.
 
 ## Stream behavior
 
@@ -65,8 +75,9 @@ Development builds use `dev`; release builds replace the version at link time.
   without another delay.
 - Once configured, `SIGUSR1` remains intercepted and ignored after release until
   the process exits, including when the duration or `0s` opens the gate first.
-- stdout contains stream data only. Usage messages and I/O errors are written to
-  stderr and cause a non-zero exit status.
+- stdout contains stream data during normal operation. Help and version
+  information are written to stdout; other usage messages and I/O errors are
+  written to stderr and cause a non-zero exit status.
 
 ## Current scope
 

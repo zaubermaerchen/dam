@@ -2,29 +2,34 @@
 
 ## プロジェクト概要
 
-`dam` は Unix パイプラインの起動ゲートです。現在の CLI は `dam DURATION`、`dam [DURATION] --release-on signal:USR1` / `signal:USR2`（`SIGUSR1` / `SIGUSR2` も同義）、単独指定の `dam --version`、および `-h` / `--help` を受け付けます。`DURATION` モードでは stdin の最初の非空 read が完了した時点から遅延を開始し、指定時間が経過するまでは stdout にストリームデータを書かず、解放後はゲートを再び閉じずにそのまま転送します。signal モードでは、引数検証後かつ最初の read 前から設定済みの SIGUSR1 / SIGUSR2 を監視し、いずれかを受信するとゲートを開きます。`--version` は stdin を読まずにバージョンを stdout へ出力し、help も stdin を読まずに stdout へ出力して終了します。
+`dam` は Unix パイプラインの起動ゲートです。現在の CLI は `dam DURATION`、`dam [DURATION] --release-on signal:USR1` / `signal:USR2`（`SIGUSR1` / `SIGUSR2` も同義）、`dam [DURATION] --release-on file:PATH`、単独指定の `dam --version`、および `-h` / `--help` を受け付けます。`DURATION` モードでは stdin の最初の非空 read が完了した時点から遅延を開始し、指定時間が経過するまでは stdout にストリームデータを書かず、解放後はゲートを再び閉じずにそのまま転送します。signal モードでは、引数検証後かつ最初の read 前から設定済みの SIGUSR1 / SIGUSR2 を監視し、いずれかを受信するとゲートを開きます。file モードでは stdin を読む前に全 path を初回 probe し、その後はゲートが CLOSED の間だけ監視して、いずれかが regular file になればゲートを開きます。`--version` は stdin を読まずにバージョンを stdout へ出力し、help も stdin を読まずに stdout へ出力して終了します。
 
 現在の実装では、次の契約を維持してください。
 
 - 指定した `DURATION` は `time.ParseDuration` 互換とし、`0s` は即時転送、負値、不正値はエラーとします。duration は省略できますが、その場合は release condition が少なくとも一つ必要です。余分な引数はエラーとします。
-- `--release-on TYPE:SOURCE` は反復指定でき、duration と release condition は順序非依存です。`--release-on signal:USR1` / `signal:USR2` と `--release-on=signal:USR1` / `signal:USR2` の分離・`=` 両形式を受理します。duration は最大1個で、少なくとも duration または release condition の一つを必要とします。現在は `signal:USR1` / `signal:SIGUSR1` と `signal:USR2` / `signal:SIGUSR2` を受理し、内部ではそれぞれ SIGUSR1 / SIGUSR2 に正規化します。その他の type・signal 名・大文字小文字違い・不正形式はエラーとします。
+- `--release-on TYPE:SOURCE` は反復指定でき、duration と release condition は順序非依存です。分離形式と `=` 形式の両方を受理します。duration は最大1個で、少なくとも duration または release condition の一つを必要とします。現在は `signal:USR1` / `signal:SIGUSR1` と `signal:USR2` / `signal:SIGUSR2` を受理し、内部ではそれぞれ SIGUSR1 / SIGUSR2 に正規化します。`file:PATH` は最初の `:` だけを type と source の区切りとして扱い、Windows の drive letter を含む path 内の追加の `:` はそのまま保持します。空 path はエラーです。相対 path は起動時の作業ディレクトリ基準とし、`~` や環境変数の展開、入力 path の正規化は行いません。その他の type・signal 名・大文字小文字違い・不正形式はエラーとします。
 - `--version` は単独指定時に `dam <version>\n` を stdout へ出力して終了し、開発時の既定値は `dev` とします。リリースビルドでは `main.version` をリンク時に差し替えます。余分な引数付きの `--version` はエラーです。
 - raw argument が完全一致する `-h` または `--help` は引数位置を問わず最優先で、複数指定でも help を一度だけ stdout へ出力して正常終了します。help 出力は末尾改行付きで、stdin を読まず、release monitor/readiness を開始しません。`--help=x`、`--release-on=--help`、`-help` は help ではなく通常の引数エラーです。help と `--version` や未知引数が併記された場合も help が優先され、引数エラー時に全文 help は自動出力しません。
-- EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。
-- 設定済みの SIGUSR1 / SIGUSR2 は最初の入力前から監視します。空 stdin の EOF は signal を待たず正常終了し、データ受信後の EOF は duration または signal による解放までデータを保持します。duration と設定済みsignalは OR 条件で、一度開いたゲートは再び閉じません。
-- 解放後も設定済みの SIGUSR1 / SIGUSR2 をプロセス終了まで捕捉・無視し、duration または `0s` が先に解放した場合も後続 signal でプロセスを終了させません。未設定のUSR signalは捕捉しません。Windows その他の未対応環境では signal 設定を明示的な引数エラーとして拒否します。
+- file 条件は全対応環境で `os.Stat` 相当の probe を使い symlink をたどります。regular file は成立、存在しない path と dangling symlink は未成立として待機します。directory、FIFO、device、symlink loop、権限エラー、その他の stat error は、ゲートが CLOSED の間だけ fatal とします。同一 path の反復指定は受理しますが、実体 path や大文字小文字による重複排除は行いません。polling 間隔と厳密な検知遅延は公開契約にしません。
+- stdin を読む前に全 file 条件の初回 probe を完了します。初回結果に一つでも fatal があれば、別の file が regular、`0s`、または入力前に届いた signal が pending でも fatal を優先します。CLOSED 中は coordinator が OPEN を確定する前に報告を受理した fatal を、同じ判定時点で pending の release event より優先します。filesystem 上の変化時刻や probe 開始時刻の厳密な先後は保証しません。
+- EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。空 stdin の EOF は release condition を待たず正常終了し、file monitor を停止します。データ受信後の EOF は duration、signal、または file による解放までデータを保持します。
+- duration、設定済み signal、file 条件は OR で、一度開いたゲートは再び閉じません。OPEN を確定したら全 file monitor を停止し、進行中の probe の完了を待たず、その後に届いた結果を無視します。OPEN 後、最初の stdout write より前でもゲートは OPEN とみなします。
+- 設定済みの SIGUSR1 / SIGUSR2 は最初の入力前から監視し、解放後もプロセス終了まで捕捉・無視します。duration、`0s`、または file が先に解放した場合も後続 signal でプロセスを終了させません。未設定のUSR signalは捕捉しません。Windows その他の未対応環境では file-only 設定を受理しますが、file と signal の混在を含め、signal 設定を含む構成は明示的な引数エラーとして拒否します。
 - 入力をバイナリを含め byte-for-byte で保持し、通常のストリーム処理中の stdout はストリームデータ専用とします。help/version の情報出力は stdout、診断は stderr 専用です。
 - 解放前に保持するストリームデータは実装内部の有界バッファに保持し、空き容量までは短い read も集約し、満杯後は通常のパイプのバックプレッシャーを利用します。バッファ容量は公開契約ではなく、現在の `preReleaseBufferSize` も内部実装詳細として扱います。
 - タイマー待機中に stdin read がブロックしても、解放時刻に保持済みデータを書き出せる構造を維持します。進行中の read が返したデータは順序を崩さず、その後に転送します。
-- SIGUSR1 / SIGUSR2 以外の外部解放イベント、繰り返すゲート遷移、設定可能なバッファ、ディスクへの退避、initially-open モードは現在の対象外です。
+- signal と file 以外の外部解放イベント、繰り返すゲート遷移、設定可能な polling 間隔やバッファ、ディスクへの退避、initially-open モードは現在の対象外です。
 
 ## リポジトリ構成
 
 - `cmd/dam/main.go`: 引数検証、遅延・注入 release ゲート、stdin/stdout 転送、終了コードを担当します。
+- `cmd/dam/release_file.go`: release coordinator と、cross-platform な file 条件の初回 probe、CLOSED 中の polling、OPEN / 空 stdin EOF での停止を担当します。
 - `cmd/dam/release_signal_unix.go`: Unix の SIGUSR1 / SIGUSR2 監視と、解放後も signal を捕捉し続けるライフサイクルを担当します。
-- `cmd/dam/release_signal_windows.go` / `cmd/dam/release_signal_unsupported.go`: 未対応環境で signal 設定を拒否しつつ duration/version のビルドを維持します。
+- `cmd/dam/release_signal_windows.go` / `cmd/dam/release_signal_unsupported.go`: file-only / duration / help / version のビルドを維持しつつ、未対応環境で signal を含む設定を拒否します。
 - `cmd/dam/main_test.go`: 時刻、EOF、バイナリ保持、バックプレッシャー、解放後転送、引数、I/O エラーの契約を固定します。
+- `cmd/dam/release_file_test.go`: cross-platform な file parser / probe / polling、fatal error の優先順位、OPEN / 空 stdin EOF での monitor 停止を固定します。
 - `cmd/dam/main_signal_unix_test.go`: プロセス分離した実 SIGUSR1 / SIGUSR2 配線と、解放後 signal の無害化を固定します。
+- `cmd/dam/main_signal_windows_test.go`: Windows で file-only を許可し、signal を含む設定を拒否する契約を固定します。
 - `.github/workflows/ci.yml`: Ubuntu、macOS、Windows で test/vet を実行し、Ubuntu で race test を実行します。
 - `.github/workflows/release.yml`: Linux、macOS、Windows の amd64/arm64 向け成果物を作成します。
 

@@ -36,6 +36,8 @@ Options:
               Release on SIGUSR1 (supported Unix platforms only).
           signal:USR2, signal:SIGUSR2
               Release on SIGUSR2 (supported Unix platforms only).
+          file:PATH
+              Release when PATH exists as a regular file.
 
   -h, --help
         Show this help and exit.
@@ -89,16 +91,30 @@ func executeWithReady(args []string, input io.Reader, output, diagnostics io.Wri
 		return 1, nil
 	}
 
-	monitor, err := newReleaseMonitor(config.signals)
+	coordinator := newReleaseCoordinator(true)
+	monitor, err := newReleaseMonitor(config.signals, coordinator)
 	if err != nil {
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
+	}
+	if len(config.files) > 0 {
+		if _, err := newFileMonitor(config.files, coordinator); err != nil {
+			writeDiagnostic(diagnostics, err)
+			return 1, monitor.Close
+		}
+	} else if err := coordinator.finishInitial(); err != nil {
+		writeDiagnostic(diagnostics, err)
+		return 1, monitor.Close
+	}
+	if err := coordinator.fatalError(); err != nil {
+		writeDiagnostic(diagnostics, err)
+		return 1, monitor.Close
 	}
 	if ready != nil {
 		ready()
 	}
 
-	if err := forward(input, output, config.delay, monitor.Release()); err != nil {
+	if err := forwardWithFailure(input, output, config.delay, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty); err != nil {
 		writeDiagnostic(diagnostics, err)
 		return 1, monitor.Close
 	}
@@ -108,6 +124,7 @@ func executeWithReady(args []string, input io.Reader, output, diagnostics io.Wri
 type runConfig struct {
 	delay   *time.Duration
 	signals []string
+	files   []string
 }
 
 func parseConfig(args []string) (runConfig, error) {
@@ -120,17 +137,17 @@ func parseConfig(args []string) (runConfig, error) {
 			if index == len(args) {
 				return runConfig{}, fmt.Errorf("missing value for --release-on")
 			}
-			signal, err := parseReleaseCondition(args[index])
+			condition, err := parseCondition(args[index])
 			if err != nil {
 				return runConfig{}, err
 			}
-			config.signals = append(config.signals, signal)
+			config.addCondition(condition)
 		case strings.HasPrefix(arg, "--release-on="):
-			signal, err := parseReleaseCondition(strings.TrimPrefix(arg, "--release-on="))
+			condition, err := parseCondition(strings.TrimPrefix(arg, "--release-on="))
 			if err != nil {
 				return runConfig{}, err
 			}
-			config.signals = append(config.signals, signal)
+			config.addCondition(condition)
 		case strings.HasPrefix(arg, "--"):
 			return runConfig{}, fmt.Errorf("unknown option %q", arg)
 		default:
@@ -150,29 +167,85 @@ func parseConfig(args []string) (runConfig, error) {
 			config.delay = &delay
 		}
 	}
-	if config.delay == nil && len(config.signals) == 0 {
+	if config.delay == nil && len(config.signals) == 0 && len(config.files) == 0 {
 		return runConfig{}, fmt.Errorf("usage: dam [DURATION] [--release-on TYPE:SOURCE]")
 	}
 	return config, nil
 }
 
-func parseReleaseCondition(value string) (string, error) {
-	typeName, source, ok := strings.Cut(value, ":")
-	if !ok || typeName != "signal" {
-		return "", fmt.Errorf("invalid release condition %q: want signal:USR1, signal:SIGUSR1, signal:USR2, or signal:SIGUSR2", value)
+type releaseCondition struct {
+	kind   string
+	source string
+}
+
+func (config *runConfig) addCondition(condition releaseCondition) {
+	if condition.kind == "signal" {
+		config.signals = append(config.signals, condition.source)
+		return
 	}
+	config.files = append(config.files, condition.source)
+}
+
+func parseCondition(value string) (releaseCondition, error) {
+	typeName, source, ok := strings.Cut(value, ":")
+	if !ok {
+		return releaseCondition{}, invalidReleaseCondition(value)
+	}
+	switch typeName {
+	case "signal":
+		signal, err := parseSignalSource(value, source)
+		if err != nil {
+			return releaseCondition{}, err
+		}
+		return releaseCondition{kind: "signal", source: signal}, nil
+	case "file":
+		if source == "" {
+			return releaseCondition{}, fmt.Errorf("invalid release condition %q: file path must not be empty", value)
+		}
+		return releaseCondition{kind: "file", source: source}, nil
+	default:
+		return releaseCondition{}, invalidReleaseCondition(value)
+	}
+}
+
+func parseReleaseCondition(value string) (string, error) {
+	condition, err := parseCondition(value)
+	if err != nil {
+		return "", err
+	}
+	if condition.kind != "signal" {
+		return "", invalidReleaseCondition(value)
+	}
+	return condition.source, nil
+}
+
+func parseSignalSource(value, source string) (string, error) {
 	switch source {
 	case "USR1", "SIGUSR1":
 		return "SIGUSR1", nil
 	case "USR2", "SIGUSR2":
 		return "SIGUSR2", nil
 	default:
-		return "", fmt.Errorf("invalid release condition %q: want signal:USR1, signal:SIGUSR1, signal:USR2, or signal:SIGUSR2", value)
+		return "", invalidReleaseCondition(value)
 	}
 }
 
+func invalidReleaseCondition(value string) error {
+	return fmt.Errorf("invalid release condition %q: want signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2, or file:PATH", value)
+}
+
 func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}) error {
+	return forwardWithFailure(input, output, delay, release, nil, nil, nil)
+}
+
+func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error) error {
 	if delay != nil && *delay == 0 {
+		if err := failureReady(failures); err != nil {
+			return err
+		}
+		if err := commitOpen(open, failures); err != nil {
+			return err
+		}
 		_, err := io.Copy(output, input)
 		return err
 	}
@@ -183,15 +256,25 @@ func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-
 
 	for {
 		select {
+		case err := <-failures:
+			if err != nil {
+				return err
+			}
 		case <-release:
+			if err := commitOpen(open, failures); err != nil {
+				return err
+			}
 			// A signal may arrive before the first read has returned. The read
 			// still owns the input ordering, so wait for its result before
 			// forwarding the now-open stream.
-			return forwardReadResult(input, output, held, <-firstResults)
+			return forwardReadResultWithCompletion(input, output, held, <-firstResults, completeEmpty)
 		case result := <-firstResults:
+			if err := failureReady(failures); err != nil {
+				return err
+			}
 			if result.n == 0 {
 				if result.err == io.EOF {
-					return nil
+					return completeEmptyInput(completeEmpty, failures)
 				}
 				if result.err != nil {
 					return result.err
@@ -204,8 +287,14 @@ func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-
 			// duration window at the same boundary.
 			select {
 			case <-release:
-				return forwardReadResult(input, output, held, result)
+				if err := commitOpen(open, failures); err != nil {
+					return err
+				}
+				return forwardReadResultWithCompletion(input, output, held, result, completeEmpty)
 			default:
+			}
+			if err := failureReady(failures); err != nil {
+				return err
 			}
 
 			var timer *time.Timer
@@ -220,9 +309,9 @@ func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-
 				defer timer.Stop()
 			}
 			if result.err != nil {
-				return forwardHeldUntilRelease(output, timerC, release, held, result.n, result.err)
+				return forwardHeldUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.n, result.err)
 			}
-			return forwardDelayed(input, output, timerC, release, held, result.n)
+			return forwardDelayedWithFailure(input, output, timerC, release, failures, open, completeEmpty, held, result.n)
 		}
 	}
 }
@@ -239,11 +328,28 @@ func startRead(input io.Reader, buffer []byte, results chan<- readResult) {
 }
 
 func forwardHeldUntilRelease(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, held []byte, heldN int, readErr error) error {
-	if timerC != nil || release != nil {
+	return forwardHeldUntilReleaseWithFailure(output, timerC, release, nil, nil, held, heldN, readErr)
+}
+
+func forwardHeldUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error, held []byte, heldN int, readErr error) error {
+	if timerC != nil || release != nil || failures != nil {
 		select {
+		case err := <-failures:
+			if err != nil {
+				return err
+			}
 		case <-timerC:
+			if err := commitOpen(open, failures); err != nil {
+				return err
+			}
 		case <-release:
+			if err := commitOpen(open, failures); err != nil {
+				return err
+			}
 		}
+	}
+	if err := failureReady(failures); err != nil {
+		return err
 	}
 	if err := writeAll(output, held[:heldN]); err != nil {
 		return err
@@ -255,13 +361,23 @@ func forwardHeldUntilRelease(output io.Writer, timerC <-chan time.Time, release 
 }
 
 func forwardDelayed(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, held []byte, heldN int) error {
+	return forwardDelayedWithFailure(input, output, timerC, release, nil, nil, nil, held, heldN)
+}
+
+func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held []byte, heldN int) error {
 	readRequests := make(chan []byte)
 	readResults := make(chan readResult, 1)
 	go readWorker(input, readRequests, readResults)
 	defer close(readRequests)
 
 	for heldN < len(held) {
+		if err := failureReady(failures); err != nil {
+			return err
+		}
 		if releaseReady(timerC, release) {
+			if err := commitOpen(open, failures); err != nil {
+				return err
+			}
 			return forwardHeldAndCopy(input, output, held[:heldN])
 		}
 		readBuffer := held[heldN:]
@@ -276,40 +392,64 @@ func forwardDelayed(input io.Reader, output io.Writer, timerC <-chan time.Time, 
 		// completed. This keeps a completed pre-release read from starting
 		// another read.
 		select {
+		case err := <-failures:
+			if err != nil {
+				return err
+			}
 		case result = <-readResults:
 			haveRead = true
 		default:
 			select {
+			case err := <-failures:
+				if err != nil {
+					return err
+				}
 			case <-release:
+				if err := commitOpen(open, failures); err != nil {
+					return err
+				}
+				if err := writeAll(output, held[:heldN]); err != nil {
+					return err
+				}
+				return forwardReadResultWithCompletion(input, output, readBuffer, <-readResults, completeEmpty)
 			case <-timerC:
+				if err := commitOpen(open, failures); err != nil {
+					return err
+				}
+				if err := writeAll(output, held[:heldN]); err != nil {
+					return err
+				}
+				return forwardReadResultWithCompletion(input, output, readBuffer, <-readResults, completeEmpty)
 			case result = <-readResults:
 				haveRead = true
 			}
 		}
 		if !haveRead {
-			if err := writeAll(output, held[:heldN]); err != nil {
-				return err
-			}
-			return forwardReadResult(input, output, readBuffer, <-readResults)
+			return nil
 		}
 
 		heldN += result.n
 		if result.err != nil {
-			return forwardHeldUntilRelease(output, timerC, release, held, heldN, result.err)
+			return forwardHeldUntilReleaseWithFailure(output, timerC, release, failures, open, held, heldN, result.err)
 		}
 
 		// A timer/release can become ready immediately after the read result.
 		// Check again before requesting another bounded-buffer read.
 		if releaseReady(timerC, release) {
+			if err := commitOpen(open, failures); err != nil {
+				return err
+			}
 			return forwardHeldAndCopy(input, output, held[:heldN])
 		}
 	}
 
 	if timerC != nil || release != nil {
-		select {
-		case <-timerC:
-		case <-release:
+		if err := waitForRelease(timerC, release, failures, open); err != nil {
+			return err
 		}
+	}
+	if err := failureReady(failures); err != nil {
+		return err
 	}
 	if err := writeAll(output, held); err != nil {
 		return err
@@ -327,6 +467,45 @@ func releaseReady(timerC <-chan time.Time, release <-chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+func failureReady(failures <-chan error) error {
+	if failures == nil {
+		return nil
+	}
+	select {
+	case err := <-failures:
+		return err
+	default:
+		return nil
+	}
+}
+
+func commitOpen(open func() error, failures <-chan error) error {
+	if err := failureReady(failures); err != nil {
+		return err
+	}
+	if open == nil {
+		return nil
+	}
+	return open()
+}
+
+func waitForRelease(timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error) error {
+	if err := failureReady(failures); err != nil {
+		return err
+	}
+	select {
+	case err := <-failures:
+		if err != nil {
+			return err
+		}
+	case <-timerC:
+		return commitOpen(open, failures)
+	case <-release:
+		return commitOpen(open, failures)
+	}
+	return nil
 }
 
 func forwardHeldAndCopy(input io.Reader, output io.Writer, held []byte) error {
@@ -355,6 +534,10 @@ func readInto(input io.Reader, buffer []byte) readResult {
 }
 
 func forwardReadResult(input io.Reader, output io.Writer, readBuffer []byte, result readResult) error {
+	return forwardReadResultWithCompletion(input, output, readBuffer, result, nil)
+}
+
+func forwardReadResultWithCompletion(input io.Reader, output io.Writer, readBuffer []byte, result readResult, completeEmpty func() error) error {
 	if result.n > 0 {
 		if err := writeAll(output, readBuffer[:result.n]); err != nil {
 			return err
@@ -362,12 +545,25 @@ func forwardReadResult(input io.Reader, output io.Writer, readBuffer []byte, res
 	}
 	if result.err != nil {
 		if result.err == io.EOF {
+			if result.n == 0 {
+				return completeEmptyInput(completeEmpty, nil)
+			}
 			return nil
 		}
 		return result.err
 	}
 	_, err := io.Copy(output, input)
 	return err
+}
+
+func completeEmptyInput(completeEmpty func() error, failures <-chan error) error {
+	if err := failureReady(failures); err != nil {
+		return err
+	}
+	if completeEmpty == nil {
+		return nil
+	}
+	return completeEmpty()
 }
 
 func writeAll(output io.Writer, data []byte) error {

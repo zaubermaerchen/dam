@@ -2,7 +2,7 @@
 
 package main
 
-// This file wires the supported Unix signal to a one-way release event while
+// This file wires the supported Unix signals to a one-way release event while
 // continuing to consume later occurrences until the command exits.
 
 import (

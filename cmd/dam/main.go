@@ -211,17 +211,6 @@ func parseCondition(value string) (releaseCondition, error) {
 	}
 }
 
-func parseReleaseCondition(value string) (string, error) {
-	condition, err := parseCondition(value)
-	if err != nil {
-		return "", err
-	}
-	if condition.kind != "signal" {
-		return "", invalidReleaseCondition(value)
-	}
-	return condition.source, nil
-}
-
 func parseSignalSource(value, source string) (string, error) {
 	switch source {
 	case "USR1", "SIGUSR1":

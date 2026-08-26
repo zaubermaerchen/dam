@@ -455,6 +455,37 @@ func TestParseConfigAcceptsSignalWithoutDuration(t *testing.T) {
 	}
 }
 
+func TestParseConfigDistinguishesAdditionalPositionalArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "second duration",
+			args: []string{"1s", "2s"},
+			want: "multiple durations are not allowed",
+		},
+		{
+			name: "unexpected argument",
+			args: []string{"1s", "foo"},
+			want: `unexpected argument "foo"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseConfig(test.args)
+			if err == nil {
+				t.Fatal("parseConfig unexpectedly succeeded")
+			}
+			if got := err.Error(); got != test.want {
+				t.Fatalf("parseConfig error = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestParseConfigRejectsInvalidReleaseConditions(t *testing.T) {
 	tests := []struct {
 		name string

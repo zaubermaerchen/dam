@@ -96,7 +96,10 @@ func parseConfig(args []string) (runConfig, error) {
 			return runConfig{}, fmt.Errorf("unknown option %q", arg)
 		default:
 			if config.delay != nil {
-				return runConfig{}, fmt.Errorf("multiple durations are not allowed")
+				if _, err := time.ParseDuration(arg); err == nil {
+					return runConfig{}, fmt.Errorf("multiple durations are not allowed")
+				}
+				return runConfig{}, fmt.Errorf("unexpected argument %q", arg)
 			}
 			delay, err := time.ParseDuration(arg)
 			if err != nil {

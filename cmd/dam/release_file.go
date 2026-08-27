@@ -130,9 +130,9 @@ func (c *releaseCoordinator) stopFilesLocked() {
 	close(c.files)
 }
 
-// beginFileProbe reserves a probe while holding the same mutex used to stop
-// monitoring. A true result means the probe may already be in flight; a later
-// OPEN/EOF transition does not wait for it and its result is ignored.
+// beginFileProbe checks the stopped state under the same mutex used to stop
+// monitoring. OPEN/EOF may stop monitoring after a true result; the probe may
+// then run, but the transition does not wait for it and its result is ignored.
 func (c *releaseCoordinator) beginFileProbe() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -275,8 +275,9 @@ func (m *fileMonitor) watchPathWithTicks(path string, ticks <-chan time.Time, be
 			if beforeProbe != nil {
 				beforeProbe()
 			}
-			// Reserve the probe under the coordinator mutex so stopFiles cannot
-			// race between a channel check and the probe call.
+			// Recheck the stopped state under the coordinator mutex before the
+			// probe. OPEN/EOF may still race after this check; that probe's result
+			// is then ignored.
 			if !m.coordinator.beginFileProbe() {
 				return
 			}

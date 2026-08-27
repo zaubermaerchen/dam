@@ -40,6 +40,8 @@ Options:
               Release on SIGUSR1 (supported Unix platforms only).
           signal:USR2, signal:SIGUSR2
               Release on SIGUSR2 (supported Unix platforms only).
+          file:PATH
+              Release when PATH exists as a regular file (supported on all platforms).
 
   -h, --help
         Show this help and exit.

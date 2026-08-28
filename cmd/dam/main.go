@@ -383,13 +383,6 @@ func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, delay *time.
 	}
 }
 
-func initialBufferSize(max int) int {
-	if max < initialPreReleaseBufferSize {
-		return max
-	}
-	return initialPreReleaseBufferSize
-}
-
 // heldBuffer stores pre-release input in separately allocated chunks. Keeping
 // old chunks alive while growing avoids the transient old-plus-new allocation
 // that a contiguous slice requires, while reserving no more than max bytes in

@@ -323,41 +323,6 @@ func (m *fileMonitor) waitForPoll(path string, interval time.Duration) bool {
 	}
 }
 
-func (m *fileMonitor) watchPathWithTicks(path string, ticks <-chan time.Time, beforeProbe func()) {
-	if monitoringStopped(m.coordinator.files) {
-		return
-	}
-
-	for {
-		select {
-		case <-m.coordinator.files:
-			return
-		case <-ticks:
-			if beforeProbe != nil {
-				beforeProbe()
-			}
-			// Recheck the stopped state under the coordinator mutex before the
-			// probe. OPEN/EOF may still race after this check; that probe's result
-			// is then ignored.
-			if !m.coordinator.beginFileProbe() {
-				return
-			}
-			ready, err := m.probe(path)
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				m.coordinator.reportFatal(err)
-				return
-			}
-			if ready {
-				_ = m.coordinator.requestOpen()
-				return
-			}
-		}
-	}
-}
-
 func monitoringStopped(stop <-chan struct{}) bool {
 	select {
 	case <-stop:

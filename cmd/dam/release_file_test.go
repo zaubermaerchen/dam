@@ -778,12 +778,16 @@ func TestReleaseCoordinatorEmptyCompletionStopsAndWinsOverLateFatal(t *testing.T
 	}
 }
 
-func TestFileMonitorSkipsProbeWhenStopArrivesAfterTick(t *testing.T) {
+func TestFileMonitorSkipsProbeWhenStopArrivesAfterPollWait(t *testing.T) {
 	coordinator := newReleaseCoordinator(false)
-	ticks := make(chan time.Time, 1)
 	probeCalled := make(chan struct{}, 1)
 	monitor := &fileMonitor{
 		coordinator: coordinator,
+		interval:    filePollInterval,
+		wait: func(_ string, _ <-chan struct{}, _ time.Duration) bool {
+			coordinator.stopFiles()
+			return true
+		},
 		probe: func(string) (bool, error) {
 			probeCalled <- struct{}{}
 			return false, nil
@@ -791,12 +795,9 @@ func TestFileMonitorSkipsProbeWhenStopArrivesAfterTick(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		monitor.watchPathWithTicks("ready", ticks, func() {
-			coordinator.stopFiles()
-		})
+		monitor.watchPath("ready")
 		close(done)
 	}()
-	ticks <- time.Now()
 
 	select {
 	case <-done:

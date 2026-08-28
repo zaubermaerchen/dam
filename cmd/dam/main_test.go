@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"reflect"
@@ -692,6 +693,114 @@ func TestParseAbsoluteDeadlineUsesEarlierInstantForDSTOverlap(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("deadline = %s (%s), want %s (%s)", got, got.UTC(), want, want.UTC())
 	}
+}
+
+func TestEarliestLocalInstantFindsShortLivedHistoricalOffset(t *testing.T) {
+	location, err := time.LoadLocationFromTZData("Synthetic/Short", shortLivedOffsetTZif(t))
+	if err != nil {
+		t.Fatalf("load synthetic timezone: %v", err)
+	}
+	parsed := time.Unix(30, 0).In(location)
+	if !sameLocalDateTime(parsed, 1970, time.January, 1, 0, 0, 0) {
+		t.Fatalf("later occurrence = %s, want 1970-01-01T00:00:00", parsed)
+	}
+
+	got := earliestLocalInstant(parsed, 1970, time.January, 1, 0, 0, 0, location)
+	want := time.Unix(0, 0).In(location)
+	if !got.Equal(want) {
+		t.Fatalf("earliest occurrence = %s (%s), want %s (%s)", got, got.UTC(), want, want.UTC())
+	}
+}
+
+func TestParseAbsoluteDeadlineHandlesTransitionAtZeroTime(t *testing.T) {
+	location, err := time.LoadLocationFromTZData("Synthetic/Zero", zeroTimeTransitionTZif(t))
+	if err != nil {
+		t.Fatalf("load synthetic timezone: %v", err)
+	}
+
+	got, err := parseAbsoluteDeadline("0001-01-01T00:00:00", location)
+	if err != nil {
+		t.Fatalf("parseAbsoluteDeadline returned error: %v", err)
+	}
+	want := time.Date(1, time.January, 1, 0, 0, -30, 0, time.UTC).In(location)
+	if !got.Equal(want) {
+		t.Fatalf("earliest occurrence = %s (%s), want %s (%s)", got, got.UTC(), want, want.UTC())
+	}
+}
+
+func shortLivedOffsetTZif(t *testing.T) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	data.WriteString("TZif")
+	data.Write(make([]byte, 16))
+	for _, count := range []uint32{0, 0, 0, 3, 4, 8} {
+		if err := binary.Write(&data, binary.BigEndian, count); err != nil {
+			t.Fatalf("write TZif header: %v", err)
+		}
+	}
+	for _, transition := range []int32{-20, 10, 20} {
+		if err := binary.Write(&data, binary.BigEndian, transition); err != nil {
+			t.Fatalf("write TZif transition: %v", err)
+		}
+	}
+	data.Write([]byte{1, 2, 3})
+	for _, zone := range []struct {
+		offset int32
+		name   byte
+	}{
+		{offset: -7200, name: 0},
+		{offset: 0, name: 2},
+		{offset: 36000, name: 4},
+		{offset: -30, name: 6},
+	} {
+		if err := binary.Write(&data, binary.BigEndian, zone.offset); err != nil {
+			t.Fatalf("write TZif offset: %v", err)
+		}
+		data.WriteByte(0)
+		data.WriteByte(zone.name)
+	}
+	data.WriteString("D\x00A\x00B\x00C\x00")
+	return data.Bytes()
+}
+
+func zeroTimeTransitionTZif(t *testing.T) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	writeTZifHeader(t, &data, '2', 0, 1, 2)
+	writeTZifZone(t, &data, 0, 0)
+	data.WriteString("X\x00")
+
+	writeTZifHeader(t, &data, '2', 1, 2, 4)
+	if err := binary.Write(&data, binary.BigEndian, int64(-62135596800)); err != nil {
+		t.Fatalf("write TZif transition: %v", err)
+	}
+	data.WriteByte(1)
+	writeTZifZone(t, &data, 30, 0)
+	writeTZifZone(t, &data, 0, 2)
+	data.WriteString("A\x00B\x00")
+	data.WriteString("\n\n")
+	return data.Bytes()
+}
+
+func writeTZifHeader(t *testing.T, data *bytes.Buffer, version byte, transitions, zones, names uint32) {
+	t.Helper()
+	data.WriteString("TZif")
+	data.WriteByte(version)
+	data.Write(make([]byte, 15))
+	for _, count := range []uint32{0, 0, 0, transitions, zones, names} {
+		if err := binary.Write(data, binary.BigEndian, count); err != nil {
+			t.Fatalf("write TZif header: %v", err)
+		}
+	}
+}
+
+func writeTZifZone(t *testing.T, data *bytes.Buffer, offset int32, name byte) {
+	t.Helper()
+	if err := binary.Write(data, binary.BigEndian, offset); err != nil {
+		t.Fatalf("write TZif offset: %v", err)
+	}
+	data.WriteByte(0)
+	data.WriteByte(name)
 }
 
 func TestParseAbsoluteDeadlineRejectsDSTGap(t *testing.T) {

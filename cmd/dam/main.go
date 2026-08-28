@@ -360,30 +360,73 @@ func sameLocalDateTime(value time.Time, year int, month time.Month, day, hour, m
 		value.Hour() == hour && value.Minute() == minute && value.Second() == second && value.Nanosecond() == 0
 }
 
-// earliestLocalInstant also considers the other side of a fall-back
-// transition. time.Date deliberately leaves which duplicate instant it
-// chooses unspecified, so selecting by instant here keeps the CLI behavior
-// stable across Go versions and time zones.
+// earliestLocalInstant checks every TZif interval that can map to the requested
+// wall time without guessing transition size or duration. It also checks the
+// exact neighboring intervals needed by the two-zone Local implementations on
+// Windows and Plan 9, whose offsets are not bounded by TZif's int32 seconds.
 func earliestLocalInstant(parsed time.Time, year int, month time.Month, day, hour, minute, second int, location *time.Location) time.Time {
-	wall := time.Date(year, month, day, hour, minute, second, 0, time.UTC)
-	offsets := make(map[int]struct{})
-	for _, delta := range []time.Duration{
-		-72 * time.Hour, -48 * time.Hour, -36 * time.Hour, -24 * time.Hour,
-		-12 * time.Hour, -6 * time.Hour, -3 * time.Hour, -2 * time.Hour,
-		-time.Hour, -30 * time.Minute, 0, 30 * time.Minute, time.Hour,
-		2 * time.Hour, 3 * time.Hour, 6 * time.Hour, 12 * time.Hour,
-		24 * time.Hour, 36 * time.Hour, 48 * time.Hour, 72 * time.Hour,
-	} {
-		_, offset := parsed.Add(delta).Zone()
-		offsets[offset] = struct{}{}
+	start, end := parsed.ZoneBounds()
+	// Compare the full value instead of calling IsZero: a real TZif boundary at
+	// 0001-01-01T00:00:00Z is a zero instant carrying location information.
+	if start == (time.Time{}) && end == (time.Time{}) {
+		// UTC and FixedZone locations have one unbounded interval, so the
+		// already validated parse is the only possible occurrence. This also
+		// avoids imposing TZif's int32 offset representation on FixedZone's
+		// unrestricted int offset.
+		return parsed
 	}
 
+	wall := time.Date(year, month, day, hour, minute, second, 0, time.UTC)
 	best := parsed
-	for offset := range offsets {
-		candidate := wall.Add(-time.Duration(offset) * time.Second).In(location)
+	considerOffset := func(offset int) {
+		const (
+			minInt64              = -1 << 63
+			maxInt64              = 1<<63 - 1
+			unixToInternalSeconds = 62135596800
+			maxTimeUnix           = maxInt64 - unixToInternalSeconds
+		)
+		wallUnix := wall.Unix()
+		offsetSeconds := int64(offset)
+		if offsetSeconds > 0 && wallUnix < minInt64+offsetSeconds ||
+			offsetSeconds < 0 && wallUnix > maxInt64+offsetSeconds {
+			return
+		}
+		candidateUnix := wallUnix - offsetSeconds
+		// time.Time stores seconds relative to year 1, so larger Unix values
+		// wrap that internal representation even though they fit in int64.
+		if candidateUnix > maxTimeUnix {
+			return
+		}
+		candidate := time.Unix(candidateUnix, 0).In(location)
 		if sameLocalDateTime(candidate, year, month, day, hour, minute, second) && candidate.Before(best) {
 			best = candidate
 		}
+	}
+
+	if start != (time.Time{}) {
+		_, offset := start.Add(-time.Nanosecond).Zone()
+		considerOffset(offset)
+	}
+	if end != (time.Time{}) {
+		_, offset := end.Zone()
+		considerOffset(offset)
+	}
+
+	const (
+		minTZifOffset = -1 << 31
+		maxTZifOffset = 1<<31 - 1
+	)
+	lastCandidate := wall.Add(-time.Duration(minTZifOffset) * time.Second)
+	for current := wall.Add(-time.Duration(maxTZifOffset) * time.Second).In(location); !current.After(lastCandidate); {
+		_, offset := current.Zone()
+		considerOffset(offset)
+
+		_, end := current.ZoneBounds()
+		// As above, only the literal zero Time is the unbounded-end sentinel.
+		if end == (time.Time{}) || end.After(lastCandidate) || !end.After(current) {
+			break
+		}
+		current = end
 	}
 	return best
 }

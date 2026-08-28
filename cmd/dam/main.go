@@ -9,15 +9,20 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const preReleaseBufferSize = 64 * 1024
 
+// Keep the initial allocation small so large configured limits are only paid
+// for when input actually fills the pre-release buffer.
+const initialPreReleaseBufferSize = 4 * 1024
+
 const helpText = `Usage:
-  dam DURATION
-  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]...
+  dam DURATION [--buffer-size SIZE]
+  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
   dam --help
   dam --version
 
@@ -39,6 +44,10 @@ Options:
               Release on SIGUSR2 (supported Unix platforms only).
           file:PATH
               Release when PATH exists as a regular file (supported on all platforms).
+
+  --buffer-size SIZE
+        Set the maximum pre-release buffer size (default: 64K).
+        SIZE is a positive byte count or a binary K/k, M/m, or G/g value.
 
   -h, --help
         Show this help and exit.
@@ -117,7 +126,7 @@ func executeWithReady(args []string, input io.Reader, output, diagnostics io.Wri
 		ready()
 	}
 
-	if err := forwardWithFailure(input, output, config.delay, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty); err != nil {
+	if err := forwardWithFailureAndBuffer(input, output, config.delay, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty, config.bufferSize); err != nil {
 		writeDiagnostic(diagnostics, err)
 		return 1, monitor.Close
 	}
@@ -125,13 +134,14 @@ func executeWithReady(args []string, input io.Reader, output, diagnostics io.Wri
 }
 
 type runConfig struct {
-	delay   *time.Duration
-	signals []string
-	files   []string
+	delay      *time.Duration
+	signals    []string
+	files      []string
+	bufferSize int
 }
 
 func parseConfig(args []string) (runConfig, error) {
-	var config runConfig
+	config := runConfig{bufferSize: preReleaseBufferSize}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -151,6 +161,22 @@ func parseConfig(args []string) (runConfig, error) {
 				return runConfig{}, err
 			}
 			config.addCondition(condition)
+		case arg == "--buffer-size":
+			index++
+			if index == len(args) {
+				return runConfig{}, fmt.Errorf("missing value for --buffer-size")
+			}
+			bufferSize, err := parseBufferSize(args[index])
+			if err != nil {
+				return runConfig{}, err
+			}
+			config.bufferSize = bufferSize
+		case strings.HasPrefix(arg, "--buffer-size="):
+			bufferSize, err := parseBufferSize(strings.TrimPrefix(arg, "--buffer-size="))
+			if err != nil {
+				return runConfig{}, err
+			}
+			config.bufferSize = bufferSize
 		case strings.HasPrefix(arg, "--"):
 			return runConfig{}, fmt.Errorf("unknown option %q", arg)
 		default:
@@ -174,6 +200,44 @@ func parseConfig(args []string) (runConfig, error) {
 		return runConfig{}, fmt.Errorf("usage: dam [DURATION] [--release-on TYPE:SOURCE]")
 	}
 	return config, nil
+}
+
+func parseBufferSize(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("invalid buffer size %q", value)
+	}
+
+	multiplier := uint64(1)
+	digits := value
+	switch value[len(value)-1] {
+	case 'K', 'k':
+		multiplier = 1 << 10
+		digits = value[:len(value)-1]
+	case 'M', 'm':
+		multiplier = 1 << 20
+		digits = value[:len(value)-1]
+	case 'G', 'g':
+		multiplier = 1 << 30
+		digits = value[:len(value)-1]
+	}
+	if digits == "" {
+		return 0, fmt.Errorf("invalid buffer size %q", value)
+	}
+	for index := 0; index < len(digits); index++ {
+		if digits[index] < '0' || digits[index] > '9' {
+			return 0, fmt.Errorf("invalid buffer size %q", value)
+		}
+	}
+
+	bytes, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil || bytes == 0 {
+		return 0, fmt.Errorf("invalid buffer size %q", value)
+	}
+	maxInt := uint64(^uint(0) >> 1)
+	if bytes > maxInt/multiplier {
+		return 0, fmt.Errorf("invalid buffer size %q", value)
+	}
+	return int(bytes * multiplier), nil
 }
 
 type releaseCondition struct {
@@ -231,6 +295,10 @@ func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-
 }
 
 func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error) error {
+	return forwardWithFailureAndBuffer(input, output, delay, release, failures, open, completeEmpty, preReleaseBufferSize)
+}
+
+func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int) error {
 	if delay != nil && *delay == 0 {
 		if err := failureReady(failures); err != nil {
 			return err
@@ -242,9 +310,10 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 		return err
 	}
 
-	held := make([]byte, preReleaseBufferSize)
+	held := newHeldBuffer(bufferSize)
+	firstReadBuffer := held.nextReadBuffer()
 	firstResults := make(chan readResult, 1)
-	startRead(input, held, firstResults)
+	startRead(input, firstReadBuffer, firstResults)
 
 	for {
 		select {
@@ -262,7 +331,7 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 			// A signal may arrive before the first read has returned. The read
 			// still owns the input ordering, so wait for its result before
 			// forwarding the now-open stream.
-			return forwardReadResultWithCompletion(input, output, held, <-firstResults, completeEmpty)
+			return forwardReadResultWithCompletion(input, output, firstReadBuffer, <-firstResults, completeEmpty)
 		case result := <-firstResults:
 			if err := failureReady(failures); err != nil {
 				return err
@@ -274,7 +343,7 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 				if result.err != nil {
 					return result.err
 				}
-				startRead(input, held, firstResults)
+				startRead(input, firstReadBuffer, firstResults)
 				continue
 			}
 
@@ -285,7 +354,7 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 				if err := commitOpen(open, failures); err != nil {
 					return err
 				}
-				return forwardReadResultWithCompletion(input, output, held, result, completeEmpty)
+				return forwardReadResultWithCompletion(input, output, firstReadBuffer, result, completeEmpty)
 			default:
 			}
 			if err := failureReady(failures); err != nil {
@@ -303,11 +372,139 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 			if timer != nil {
 				defer timer.Stop()
 			}
-			if result.err != nil {
-				return forwardHeldUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.n, result.err)
+			if err := held.recordRead(result.n); err != nil {
+				return err
 			}
-			return forwardDelayedWithFailure(input, output, timerC, release, failures, open, completeEmpty, held, result.n)
+			if result.err != nil {
+				return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.err)
+			}
+			return forwardDelayedBufferWithFailure(input, output, timerC, release, failures, open, completeEmpty, held)
 		}
+	}
+}
+
+// heldBuffer stores pre-release input in separately allocated chunks. Keeping
+// old chunks alive while growing avoids the transient old-plus-new allocation
+// that a contiguous slice requires, while reserving no more than max bytes in
+// total.
+type heldBuffer struct {
+	chunks   [][]byte
+	used     []int
+	max      int
+	reserved int
+}
+
+func newHeldBuffer(max int) *heldBuffer {
+	if max < 0 {
+		max = 0
+	}
+	held := &heldBuffer{max: max}
+	held.grow()
+	return held
+}
+
+func (held *heldBuffer) grow() bool {
+	if held == nil || held.reserved >= held.max {
+		return false
+	}
+
+	remaining := held.max - held.reserved
+	chunkSize := initialPreReleaseBufferSize
+	if len(held.chunks) > 0 {
+		previousSize := len(held.chunks[len(held.chunks)-1])
+		if previousSize > 0 && previousSize <= remaining/2 {
+			chunkSize = previousSize * 2
+		} else {
+			chunkSize = remaining
+		}
+	}
+	if chunkSize > remaining {
+		chunkSize = remaining
+	}
+	if chunkSize <= 0 {
+		return false
+	}
+
+	held.chunks = append(held.chunks, make([]byte, chunkSize))
+	held.used = append(held.used, 0)
+	held.reserved += chunkSize
+	return true
+}
+
+func (held *heldBuffer) nextReadBuffer() []byte {
+	if held == nil {
+		return nil
+	}
+	for {
+		if len(held.chunks) == 0 {
+			if !held.grow() {
+				return nil
+			}
+		}
+		last := len(held.chunks) - 1
+		if held.used[last] < len(held.chunks[last]) {
+			return held.chunks[last][held.used[last]:]
+		}
+		if !held.grow() {
+			return nil
+		}
+	}
+}
+
+func (held *heldBuffer) recordRead(n int) error {
+	if held == nil {
+		if n == 0 {
+			return nil
+		}
+		return fmt.Errorf("cannot record %d bytes in a nil held buffer", n)
+	}
+	if n < 0 {
+		return fmt.Errorf("invalid held read count %d", n)
+	}
+	if len(held.chunks) == 0 {
+		if n == 0 {
+			return nil
+		}
+		return fmt.Errorf("held read count %d exceeds available buffer", n)
+	}
+	last := len(held.chunks) - 1
+	available := len(held.chunks[last]) - held.used[last]
+	if n > available {
+		return fmt.Errorf("held read count %d exceeds available buffer %d", n, available)
+	}
+	held.used[last] += n
+	return nil
+}
+
+func (held *heldBuffer) reservedCapacity() int {
+	if held == nil {
+		return 0
+	}
+	return held.reserved
+}
+
+func (held *heldBuffer) writeTo(output io.Writer) error {
+	if held == nil {
+		return nil
+	}
+	for index, chunk := range held.chunks {
+		if err := writeAll(output, chunk[:held.used[index]]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func heldBufferFromSlice(data []byte, used, max int) *heldBuffer {
+	if max < len(data) {
+		max = len(data)
+	}
+	data = data[:len(data):len(data)]
+	return &heldBuffer{
+		chunks:   [][]byte{data},
+		used:     []int{used},
+		max:      max,
+		reserved: len(data),
 	}
 }
 
@@ -327,6 +524,10 @@ func forwardHeldUntilRelease(output io.Writer, timerC <-chan time.Time, release 
 }
 
 func forwardHeldUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error, held []byte, heldN int, readErr error) error {
+	return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, heldBufferFromSlice(held, heldN, len(held)), readErr)
+}
+
+func forwardHeldBufferUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error, held *heldBuffer, readErr error) error {
 	if timerC != nil || release != nil || failures != nil {
 		select {
 		case err, ok := <-failures:
@@ -349,7 +550,7 @@ func forwardHeldUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Tim
 	if err := failureReady(failures); err != nil {
 		return err
 	}
-	if err := writeAll(output, held[:heldN]); err != nil {
+	if err := held.writeTo(output); err != nil {
 		return err
 	}
 	if readErr == io.EOF {
@@ -363,12 +564,20 @@ func forwardDelayed(input io.Reader, output io.Writer, timerC <-chan time.Time, 
 }
 
 func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held []byte, heldN int) error {
+	return forwardDelayedWithFailureAndBuffer(input, output, timerC, release, failures, open, completeEmpty, held, heldN, len(held))
+}
+
+func forwardDelayedWithFailureAndBuffer(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held []byte, heldN, maxBufferSize int) error {
+	return forwardDelayedBufferWithFailure(input, output, timerC, release, failures, open, completeEmpty, heldBufferFromSlice(held, heldN, maxBufferSize))
+}
+
+func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held *heldBuffer) error {
 	readRequests := make(chan []byte)
 	readResults := make(chan readResult, 1)
 	go readWorker(input, readRequests, readResults)
 	defer close(readRequests)
 
-	for heldN < len(held) {
+	for {
 		if err := failureReady(failures); err != nil {
 			return err
 		}
@@ -376,9 +585,12 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 			if err := commitOpen(open, failures); err != nil {
 				return err
 			}
-			return forwardHeldAndCopy(input, output, held[:heldN])
+			return forwardHeldBufferAndCopy(input, output, held)
 		}
-		readBuffer := held[heldN:]
+		readBuffer := held.nextReadBuffer()
+		if len(readBuffer) == 0 {
+			break
+		}
 		readRequests <- readBuffer
 
 		var (
@@ -412,7 +624,7 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 				if err := commitOpen(open, failures); err != nil {
 					return err
 				}
-				if err := writeAll(output, held[:heldN]); err != nil {
+				if err := held.writeTo(output); err != nil {
 					return err
 				}
 				return forwardReadResultWithCompletion(input, output, readBuffer, <-readResults, completeEmpty)
@@ -420,7 +632,7 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 				if err := commitOpen(open, failures); err != nil {
 					return err
 				}
-				if err := writeAll(output, held[:heldN]); err != nil {
+				if err := held.writeTo(output); err != nil {
 					return err
 				}
 				return forwardReadResultWithCompletion(input, output, readBuffer, <-readResults, completeEmpty)
@@ -432,9 +644,11 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 			return errReleaseFailureChannelClosed
 		}
 
-		heldN += result.n
+		if err := held.recordRead(result.n); err != nil {
+			return err
+		}
 		if result.err != nil {
-			return forwardHeldUntilReleaseWithFailure(output, timerC, release, failures, open, held, heldN, result.err)
+			return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.err)
 		}
 
 		// A timer/release can become ready immediately after the read result.
@@ -443,7 +657,7 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 			if err := commitOpen(open, failures); err != nil {
 				return err
 			}
-			return forwardHeldAndCopy(input, output, held[:heldN])
+			return forwardHeldBufferAndCopy(input, output, held)
 		}
 	}
 
@@ -455,7 +669,7 @@ func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan 
 	if err := failureReady(failures); err != nil {
 		return err
 	}
-	if err := writeAll(output, held); err != nil {
+	if err := held.writeTo(output); err != nil {
 		return err
 	}
 	_, err := io.Copy(output, input)
@@ -519,7 +733,11 @@ func waitForRelease(timerC <-chan time.Time, release <-chan struct{}, failures <
 }
 
 func forwardHeldAndCopy(input io.Reader, output io.Writer, held []byte) error {
-	if err := writeAll(output, held); err != nil {
+	return forwardHeldBufferAndCopy(input, output, heldBufferFromSlice(held, len(held), len(held)))
+}
+
+func forwardHeldBufferAndCopy(input io.Reader, output io.Writer, held *heldBuffer) error {
+	if err := held.writeTo(output); err != nil {
 		return err
 	}
 	_, err := io.Copy(output, input)

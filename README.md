@@ -21,12 +21,8 @@ go build -o dam ./cmd/dam
 ## Usage
 
 ```text
-dam DURATION
-dam [DURATION] --release-on signal:USR1
-dam [DURATION] --release-on signal:SIGUSR1
-dam [DURATION] --release-on signal:USR2
-dam [DURATION] --release-on signal:SIGUSR2
-dam [DURATION] --release-on file:PATH
+dam DURATION [--buffer-size SIZE]
+dam [DURATION] --release-on TYPE:SOURCE [--buffer-size SIZE]
 dam -h
 dam --help
 dam --version
@@ -34,6 +30,13 @@ dam --version
 
 `DURATION` uses Go's `time.ParseDuration` syntax, for example `500ms`, `3s`,
 `2m`, or `1h30m`.
+
+`--buffer-size SIZE` and `--buffer-size=SIZE` set the maximum amount of
+pre-release stream data held in memory. The default is `64K`. `SIZE` must be a
+positive integer number of bytes, or a positive integer followed by `K`, `k`,
+`M`, `m`, `G`, or `g`; suffixes use binary multipliers (1024, 1024², and
+1024³). Values such as `0`, negative numbers, decimals, `KB`, and `KiB` are
+invalid. This option does not itself provide a release condition.
 
 ```bash
 printf 'hello' | ./dam 3s
@@ -91,8 +94,10 @@ Argument errors do not print the full help text automatically.
   empty stdin exits successfully without waiting for a configured release
   condition.
 - Input is preserved byte-for-byte, including binary data.
-- Before release, stream data is held in a bounded internal buffer. Once that
-  buffer is full, ordinary pipe backpressure limits the producer.
+- Before release, stream data is held in a bounded internal buffer. Its maximum
+  size is controlled by `--buffer-size` (64K by default). The buffer grows as
+  needed up to that maximum; once full, ordinary pipe backpressure limits the
+  producer.
 - After release, the gate stays open and subsequent input is passed through
   without another delay.
 - File monitoring stops when the gate opens or empty stdin reaches EOF. An
@@ -111,7 +116,7 @@ Argument errors do not print the full help text automatically.
 
 The current implementation provides a duration-, `SIGUSR1`/`SIGUSR2`-, and
 file-based one-way gate plus help and version reporting. Repeated gate
-transitions, configurable polling or buffer sizes, spill-to-disk behavior, and
+transitions, configurable polling, spill-to-disk behavior, and
 an initially-open mode are not implemented. File conditions work on Windows
 and other targets. Signal release is not available on unsupported targets;
 those builds accept duration and file-only configurations, but reject any

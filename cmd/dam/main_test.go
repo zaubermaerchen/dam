@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,8 +20,8 @@ const (
 )
 
 const expectedHelpText = `Usage:
-  dam DURATION
-  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]...
+  dam DURATION [--buffer-size SIZE]
+  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
   dam --help
   dam --version
 
@@ -42,6 +43,10 @@ Options:
               Release on SIGUSR2 (supported Unix platforms only).
           file:PATH
               Release when PATH exists as a regular file (supported on all platforms).
+
+  --buffer-size SIZE
+        Set the maximum pre-release buffer size (default: 64K).
+        SIZE is a positive byte count or a binary K/k, M/m, or G/g value.
 
   -h, --help
         Show this help and exit.
@@ -611,6 +616,268 @@ func TestParseConfigAcceptsUSR2AliasesAndPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestParseConfigDefaultsBufferSize(t *testing.T) {
+	config, err := parseConfig([]string{"1s"})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if got, want := config.bufferSize, preReleaseBufferSize; got != want {
+		t.Fatalf("buffer size = %d, want default %d", got, want)
+	}
+}
+
+func TestParseConfigAcceptsBufferSizeFormsAndBinaryUnits(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{name: "bytes separated", args: []string{"1s", "--buffer-size", "123"}, want: 123},
+		{name: "bytes equals", args: []string{"--buffer-size=123", "1s"}, want: 123},
+		{name: "upper kilobytes", args: []string{"1s", "--buffer-size", "2K"}, want: 2 * 1024},
+		{name: "lower kilobytes", args: []string{"1s", "--buffer-size=1k"}, want: 1024},
+		{name: "upper megabytes", args: []string{"1s", "--buffer-size=3M"}, want: 3 * 1024 * 1024},
+		{name: "lower megabytes", args: []string{"--buffer-size", "4m", "1s"}, want: 4 * 1024 * 1024},
+		{name: "upper gigabytes", args: []string{"1s", "--buffer-size=1G"}, want: 1024 * 1024 * 1024},
+		{name: "lower gigabytes", args: []string{"--buffer-size", "1g", "1s"}, want: 1024 * 1024 * 1024},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := parseConfig(test.args)
+			if err != nil {
+				t.Fatalf("parseConfig returned error: %v", err)
+			}
+			if config.bufferSize != test.want {
+				t.Fatalf("buffer size = %d, want %d", config.bufferSize, test.want)
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsInvalidBufferSizes(t *testing.T) {
+	for _, value := range []string{
+		"",
+		"0",
+		"-1",
+		"+1",
+		"1.5",
+		"1KB",
+		"1KiB",
+		"1KK",
+		"1T",
+		"18446744073709551615",
+		"18446744073709551615G",
+	} {
+		t.Run(value, func(t *testing.T) {
+			args := []string{"1s", "--buffer-size", value}
+			if _, err := parseConfig(args); err == nil {
+				t.Fatal("parseConfig unexpectedly succeeded")
+			}
+		})
+	}
+
+	for _, args := range [][]string{
+		{"1s", "--buffer-size"},
+		{"1s", "--buffer-size="},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if _, err := parseConfig(args); err == nil {
+				t.Fatal("parseConfig unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestParseConfigBufferSizeAloneIsNotAReleaseCondition(t *testing.T) {
+	if _, err := parseConfig([]string{"--buffer-size", "1K"}); err == nil {
+		t.Fatal("buffer-size without a release condition unexpectedly succeeded")
+	}
+}
+
+func TestRunUsesSmallInitialReadRegionForConfiguredBuffer(t *testing.T) {
+	const bufferSize = 64 * 1024
+	input := &initialReadSizeReader{readSizes: make(chan int, 1)}
+	var output, diagnostics bytes.Buffer
+	status := make(chan int, 1)
+	go func() {
+		status <- run([]string{"1ms", "--buffer-size", "64K"}, input, &output, &diagnostics)
+	}()
+
+	var firstReadSize int
+	select {
+	case firstReadSize = <-input.readSizes:
+	case <-time.After(testTimeout):
+		t.Fatal("run did not attempt the first read")
+	}
+	if firstReadSize >= bufferSize {
+		t.Fatalf("first read region = %d, want less than configured maximum %d", firstReadSize, bufferSize)
+	}
+
+	select {
+	case gotStatus := <-status:
+		if gotStatus != 0 {
+			t.Fatalf("run status = %d, diagnostics = %q", gotStatus, diagnostics.String())
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("run did not complete after releasing configured buffer")
+	}
+	if got, want := output.String(), "x"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestForwardStopsReadingAtConfiguredBufferLimit(t *testing.T) {
+	const (
+		maxBufferSize = 5000
+		readChunkSize = 1024
+	)
+	input := &configuredBoundedReadReader{
+		max:         maxBufferSize,
+		chunk:       readChunkSize,
+		readStarted: make(chan int, 16),
+		full:        make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	release := input.release
+	output := &bytes.Buffer{}
+	status := make(chan error, 1)
+	go func() {
+		delay := time.Hour
+		status <- forwardWithFailureAndBuffer(input, output, &delay, release, nil, nil, nil, maxBufferSize)
+	}()
+
+	wantReads := (maxBufferSize + readChunkSize - 1) / readChunkSize
+	select {
+	case <-input.full:
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not fill the configured buffer")
+	}
+	for wantRead := 1; wantRead <= wantReads; wantRead++ {
+		select {
+		case gotRead := <-input.readStarted:
+			if gotRead != wantRead {
+				t.Fatalf("read sequence = %d, want %d", gotRead, wantRead)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("forward started only %d of %d reads", wantRead-1, wantReads)
+		}
+	}
+	select {
+	case gotRead := <-input.readStarted:
+		t.Fatalf("started read %d after reaching configured limit", gotRead)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-status:
+		if err != nil {
+			t.Fatalf("forward returned error: %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not complete after release")
+	}
+	if got, want := output.Bytes(), input.data; !bytes.Equal(got, want) {
+		t.Fatalf("output changed input: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+func TestHeldBufferReservesCapacityWithinMaximum(t *testing.T) {
+	for _, max := range []int{1, 4095, 4096, 4097, 8191, 8192, 8193} {
+		t.Run(strconv.Itoa(max), func(t *testing.T) {
+			held := newHeldBuffer(max)
+			if got := held.reservedCapacity(); got > max {
+				t.Fatalf("initial reserved capacity = %d, want at most %d", got, max)
+			}
+			if max > initialPreReleaseBufferSize && held.reservedCapacity() >= max {
+				t.Fatalf("initial allocation reserved %d bytes for maximum %d", held.reservedCapacity(), max)
+			}
+
+			for {
+				readBuffer := held.nextReadBuffer()
+				if len(readBuffer) == 0 {
+					break
+				}
+				if got := held.reservedCapacity(); got > max {
+					t.Fatalf("reserved capacity = %d after growth, want at most %d", got, max)
+				}
+				if err := held.recordRead(len(readBuffer)); err != nil {
+					t.Fatalf("recordRead returned error: %v", err)
+				}
+			}
+
+			if got := held.reservedCapacity(); got != max {
+				t.Fatalf("final reserved capacity = %d, want %d", got, max)
+			}
+		})
+	}
+}
+
+func TestHeldBufferDoesNotEagerlyReserveLargeMaximum(t *testing.T) {
+	held := newHeldBuffer(1 << 30)
+	if got, want := held.reservedCapacity(), initialPreReleaseBufferSize; got != want {
+		t.Fatalf("initial reserved capacity = %d, want %d", got, want)
+	}
+}
+
+func TestHeldBufferWritesChunksInReadOrder(t *testing.T) {
+	const maxBufferSize = 4097
+	input := make([]byte, maxBufferSize)
+	for index := range input {
+		input[index] = byte(index)
+	}
+
+	held := newHeldBuffer(maxBufferSize)
+	for len(input) > 0 {
+		readBuffer := held.nextReadBuffer()
+		if len(readBuffer) == 0 {
+			t.Fatal("held buffer ran out of capacity before all input was recorded")
+		}
+		n := len(input)
+		if n > len(readBuffer) {
+			n = len(readBuffer)
+		}
+		copy(readBuffer[:n], input[:n])
+		if err := held.recordRead(n); err != nil {
+			t.Fatalf("recordRead returned error: %v", err)
+		}
+		input = input[n:]
+	}
+
+	var output bytes.Buffer
+	if err := held.writeTo(&output); err != nil {
+		t.Fatalf("writeTo returned error: %v", err)
+	}
+	want := make([]byte, maxBufferSize)
+	for index := range want {
+		want[index] = byte(index)
+	}
+	if !bytes.Equal(output.Bytes(), want) {
+		t.Fatalf("held output changed byte order")
+	}
+	if got := held.reservedCapacity(); got > maxBufferSize {
+		t.Fatalf("reserved capacity = %d, want at most %d", got, maxBufferSize)
+	}
+}
+
+func TestParseBufferSize32BitBoundaries(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("32-bit integer boundary test")
+	}
+
+	for _, value := range []string{"2147483648", "2G", "3G"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := parseBufferSize(value); err == nil {
+				t.Fatalf("parseBufferSize(%q) unexpectedly succeeded", value)
+			}
+		})
+	}
+	if got, err := parseBufferSize("2147483647"); err != nil || got != 2147483647 {
+		t.Fatalf("parseBufferSize(2147483647) = %d, %v", got, err)
+	}
+}
+
 func TestParseConfigRejectsInvalidUSR2Conditions(t *testing.T) {
 	for _, value := range []string{
 		"signal:usr2",
@@ -1085,6 +1352,51 @@ func (r *trackingReader) Read([]byte) (int, error) {
 	return 0, errors.New("stdin should not be read")
 }
 
+type initialReadSizeReader struct {
+	readSizes chan int
+}
+
+func (r *initialReadSizeReader) Read(p []byte) (int, error) {
+	r.readSizes <- len(p)
+	p[0] = 'x'
+	return 1, io.EOF
+}
+
+type configuredBoundedReadReader struct {
+	max         int
+	chunk       int
+	readStarted chan int
+	full        chan struct{}
+	release     chan struct{}
+	reads       int
+	data        []byte
+	once        sync.Once
+}
+
+func (r *configuredBoundedReadReader) Read(p []byte) (int, error) {
+	r.reads++
+	r.readStarted <- r.reads
+	if len(r.data) < r.max {
+		readSize := len(p)
+		if readSize > r.chunk {
+			readSize = r.chunk
+		}
+		if remaining := r.max - len(r.data); readSize > remaining {
+			readSize = remaining
+		}
+		for index := 0; index < readSize; index++ {
+			p[index] = byte(r.reads)
+		}
+		r.data = append(r.data, p[:readSize]...)
+		if len(r.data) == r.max {
+			r.once.Do(func() { close(r.full) })
+		}
+		return readSize, nil
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
 type errorWriter struct {
 	err error
 }
@@ -1104,7 +1416,13 @@ func (b *lockedBuffer) Write(data []byte) (int, error) {
 	defer b.mu.Unlock()
 	n, err := b.Buffer.Write(data)
 	if n > 0 && b.writeTimes != nil {
-		b.writeTimes <- time.Now()
+		// Chunked pre-release storage can flush with multiple writes. The
+		// notification is only a timing observation, so never let a full test
+		// channel block the stream writer.
+		select {
+		case b.writeTimes <- time.Now():
+		default:
+		}
 	}
 	return n, err
 }

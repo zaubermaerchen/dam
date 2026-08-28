@@ -667,14 +667,21 @@ func TestParseConfigRejectsMalformedAbsoluteDeadlines(t *testing.T) {
 }
 
 func TestParseConfigRejectsMultipleKindsOfDeadlines(t *testing.T) {
-	for _, args := range [][]string{
-		{"1s", "2026-12-31T23:59"},
-		{"2026-12-31T23:59", "1s"},
-		{"2026-12-31T23:59", "2027-01-01T00:00"},
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"1s", "2026-12-31T23:59"}, want: "multiple deadlines are not allowed"},
+		{args: []string{"2026-12-31T23:59", "1s"}, want: "multiple deadlines are not allowed"},
+		{args: []string{"2026-12-31T23:59", "2027-01-01T00:00"}, want: "multiple deadlines are not allowed"},
 	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			if _, err := parseConfigAt(args, time.UTC); err == nil {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			_, err := parseConfigAt(test.args, time.UTC)
+			if err == nil {
 				t.Fatal("parseConfigAt unexpectedly succeeded")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %q, want substring %q", err, test.want)
 			}
 		})
 	}

@@ -81,7 +81,7 @@ Argument errors do not print the full help text automatically.
 
 - A relative duration starts on the first non-empty read from stdin, not when
   the process starts. An absolute local deadline is monitored before the
-  first read. With no input, a relative timer is never started and stdin exits
+  first read. With no input, a relative timer is never started and `dam` exits
   normally without waiting for an absolute deadline.
 - Each configured signal is monitored after argument validation and before the
   first input read. Any configured signal received before input opens the gate

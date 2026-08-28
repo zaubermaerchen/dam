@@ -243,10 +243,12 @@ func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 			return runConfig{}, fmt.Errorf("unknown option %q", arg)
 		default:
 			if config.delay != nil || config.deadline != nil {
-				if isDeadlineToken(arg, location) {
-					// Keep the established diagnostic for compatibility even
-					// though the positional value now accepts an absolute deadline.
+				if _, err := time.ParseDuration(arg); err == nil && config.delay != nil {
+					// Preserve the established diagnostic for two relative durations.
 					return runConfig{}, fmt.Errorf("multiple durations are not allowed")
+				}
+				if isDeadlineToken(arg, location) {
+					return runConfig{}, fmt.Errorf("multiple deadlines are not allowed")
 				}
 				return runConfig{}, fmt.Errorf("unexpected argument %q", arg)
 			}

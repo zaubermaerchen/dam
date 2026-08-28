@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,17 +22,18 @@ const preReleaseBufferSize = 64 * 1024
 const initialPreReleaseBufferSize = 4 * 1024
 
 const helpText = `Usage:
-  dam DURATION [--buffer-size SIZE]
-  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
+  dam DEADLINE [--buffer-size SIZE]
+  dam [DEADLINE] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
   dam --help
   dam --version
 
 Hold pipeline output until a release condition is met.
 
 Arguments:
-  DURATION
-        Start the release timer after stdin's first non-empty read completes.
-        Uses Go duration syntax, such as 500ms, 3s, or 2m.
+  DEADLINE
+        A relative Go duration (such as 500ms, 3s, or 2m) starts after the
+        first non-empty stdin read. An absolute local datetime in
+        YYYY-MM-DDTHH:MM[:SS] form is monitored from startup in local time.
 
 Options:
   --release-on TYPE:SOURCE
@@ -69,7 +71,11 @@ func main() {
 }
 
 func run(args []string, input io.Reader, output, diagnostics io.Writer) int {
-	status, cleanup := execute(args, input, output, diagnostics)
+	return runWithClock(args, input, output, diagnostics, defaultRuntimeClock())
+}
+
+func runWithClock(args []string, input io.Reader, output, diagnostics io.Writer, clock runtimeClock) int {
+	status, cleanup := executeWithClock(args, input, output, diagnostics, nil, clock)
 	if cleanup != nil {
 		cleanup()
 	}
@@ -81,6 +87,47 @@ func execute(args []string, input io.Reader, output, diagnostics io.Writer) (int
 }
 
 func executeWithReady(args []string, input io.Reader, output, diagnostics io.Writer, ready func()) (int, func()) {
+	return executeWithClock(args, input, output, diagnostics, ready, defaultRuntimeClock())
+}
+
+// runtimeClock contains the process-wide time dependencies. Keeping these
+// dependencies at the execution boundary lets tests exercise absolute
+// deadlines without waiting on wall-clock time, while production uses the
+// normal time package behavior.
+type runtimeClock struct {
+	now      func() time.Time
+	location *time.Location
+	newTimer func(time.Duration) (<-chan time.Time, func())
+}
+
+func defaultRuntimeClock() runtimeClock {
+	return runtimeClock{
+		now:      time.Now,
+		location: time.Local,
+		newTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(delay)
+			return timer.C, func() { timer.Stop() }
+		},
+	}
+}
+
+func (clock runtimeClock) normalized() runtimeClock {
+	if clock.now == nil {
+		clock.now = time.Now
+	}
+	if clock.location == nil {
+		clock.location = time.Local
+		if clock.location == nil {
+			clock.location = time.UTC
+		}
+	}
+	if clock.newTimer == nil {
+		clock.newTimer = defaultRuntimeClock().newTimer
+	}
+	return clock
+}
+
+func executeWithClock(args []string, input io.Reader, output, diagnostics io.Writer, ready func(), clock runtimeClock) (int, func()) {
 	if slices.Contains(args, "-h") || slices.Contains(args, "--help") {
 		if err := writeAll(output, []byte(helpText)); err != nil {
 			writeDiagnostic(diagnostics, err)
@@ -97,7 +144,8 @@ func executeWithReady(args []string, input io.Reader, output, diagnostics io.Wri
 		return 0, nil
 	}
 
-	config, err := parseConfig(args)
+	clock = clock.normalized()
+	config, err := parseConfigAt(args, clock.location)
 	if err != nil {
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
@@ -122,25 +170,39 @@ func executeWithReady(args []string, input io.Reader, output, diagnostics io.Wri
 		writeDiagnostic(diagnostics, err)
 		return 1, monitor.Close
 	}
+	stopDeadline := startDeadlineMonitor(config.deadline, clock.now, coordinator, clock.newTimer)
+	cleanup := func() {
+		if stopDeadline != nil {
+			stopDeadline()
+		}
+		monitor.Close()
+	}
 	if ready != nil {
 		ready()
 	}
 
 	if err := forwardWithFailureAndBuffer(input, output, config.delay, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty, config.bufferSize); err != nil {
 		writeDiagnostic(diagnostics, err)
-		return 1, monitor.Close
+		return 1, cleanup
 	}
-	return 0, monitor.Close
+	return 0, cleanup
 }
 
 type runConfig struct {
-	delay      *time.Duration
-	signals    []string
-	files      []string
+	delay    *time.Duration
+	deadline *time.Time
+	signals  []string
+	files    []string
+
 	bufferSize int
 }
 
 func parseConfig(args []string) (runConfig, error) {
+	return parseConfigAt(args, time.Local)
+}
+
+func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
+	location = normalizeLocation(location)
 	config := runConfig{bufferSize: preReleaseBufferSize}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -180,26 +242,300 @@ func parseConfig(args []string) (runConfig, error) {
 		case strings.HasPrefix(arg, "--"):
 			return runConfig{}, fmt.Errorf("unknown option %q", arg)
 		default:
-			if config.delay != nil {
-				if _, err := time.ParseDuration(arg); err == nil {
+			if config.delay != nil || config.deadline != nil {
+				if isDeadlineToken(arg, location) {
+					// Keep the established diagnostic for compatibility even
+					// though the positional value now accepts an absolute deadline.
 					return runConfig{}, fmt.Errorf("multiple durations are not allowed")
 				}
 				return runConfig{}, fmt.Errorf("unexpected argument %q", arg)
 			}
-			delay, err := time.ParseDuration(arg)
+			delay, deadline, err := parseDeadlineArgument(arg, location)
 			if err != nil {
-				return runConfig{}, fmt.Errorf("invalid duration %q: %w", arg, err)
+				return runConfig{}, err
 			}
-			if delay < 0 {
-				return runConfig{}, fmt.Errorf("duration must not be negative")
-			}
-			config.delay = &delay
+			config.delay = delay
+			config.deadline = deadline
 		}
 	}
-	if config.delay == nil && len(config.signals) == 0 && len(config.files) == 0 {
-		return runConfig{}, fmt.Errorf("usage: dam [DURATION] [--release-on TYPE:SOURCE]")
+	if config.delay == nil && config.deadline == nil && len(config.signals) == 0 && len(config.files) == 0 {
+		return runConfig{}, fmt.Errorf("usage: dam [DEADLINE] [--release-on TYPE:SOURCE]")
 	}
 	return config, nil
+}
+
+func parseDeadlineArgument(value string, location *time.Location) (*time.Duration, *time.Time, error) {
+	delay, durationErr := time.ParseDuration(value)
+	if durationErr == nil {
+		if delay < 0 {
+			return nil, nil, fmt.Errorf("duration must not be negative")
+		}
+		return &delay, nil, nil
+	}
+
+	deadline, absoluteErr := parseAbsoluteDeadline(value, location)
+	if absoluteErr == nil {
+		return nil, &deadline, nil
+	}
+	return nil, nil, fmt.Errorf("invalid deadline %q: want a Go duration or YYYY-MM-DDTHH:MM[:SS] local datetime", value)
+}
+
+func isDeadlineToken(value string, location *time.Location) bool {
+	if _, err := time.ParseDuration(value); err == nil {
+		return true
+	}
+	_, err := parseAbsoluteDeadline(value, location)
+	return err == nil
+}
+
+func normalizeLocation(location *time.Location) *time.Location {
+	if location != nil {
+		return location
+	}
+	if time.Local != nil {
+		return time.Local
+	}
+	return time.UTC
+}
+
+func parseAbsoluteDeadline(value string, location *time.Location) (time.Time, error) {
+	location = normalizeLocation(location)
+	if len(value) != len("2006-01-02T15:04") && len(value) != len("2006-01-02T15:04:05") {
+		return time.Time{}, fmt.Errorf("absolute deadline must use YYYY-MM-DDTHH:MM[:SS]")
+	}
+	if value[4] != '-' || value[7] != '-' || value[10] != 'T' || value[13] != ':' {
+		return time.Time{}, fmt.Errorf("absolute deadline must use YYYY-MM-DDTHH:MM[:SS]")
+	}
+	if len(value) == 19 && value[16] != ':' {
+		return time.Time{}, fmt.Errorf("absolute deadline must use YYYY-MM-DDTHH:MM:SS")
+	}
+	if !allASCIIDigits(value[:4]) || !allASCIIDigits(value[5:7]) || !allASCIIDigits(value[8:10]) || !allASCIIDigits(value[11:13]) || !allASCIIDigits(value[14:16]) {
+		return time.Time{}, fmt.Errorf("absolute deadline contains non-numeric fields")
+	}
+	year := parseASCIIDigits(value[:4])
+	month := time.Month(parseASCIIDigits(value[5:7]))
+	day := parseASCIIDigits(value[8:10])
+	hour := parseASCIIDigits(value[11:13])
+	minute := parseASCIIDigits(value[14:16])
+	second := 0
+	if len(value) == 19 {
+		if !allASCIIDigits(value[17:19]) {
+			return time.Time{}, fmt.Errorf("absolute deadline contains non-numeric fields")
+		}
+		second = parseASCIIDigits(value[17:19])
+	}
+	if year < 1 || year > 9999 {
+		return time.Time{}, fmt.Errorf("absolute deadline year must be between 0001 and 9999")
+	}
+
+	parsed := time.Date(year, month, day, hour, minute, second, 0, location)
+	if !sameLocalDateTime(parsed, year, month, day, hour, minute, second) {
+		return time.Time{}, fmt.Errorf("absolute deadline is not a valid local datetime")
+	}
+	return earliestLocalInstant(parsed, year, month, day, hour, minute, second, location), nil
+}
+
+func allASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseASCIIDigits(value string) int {
+	result := 0
+	for index := 0; index < len(value); index++ {
+		result = result*10 + int(value[index]-'0')
+	}
+	return result
+}
+
+func sameLocalDateTime(value time.Time, year int, month time.Month, day, hour, minute, second int) bool {
+	return value.Year() == year && value.Month() == month && value.Day() == day &&
+		value.Hour() == hour && value.Minute() == minute && value.Second() == second && value.Nanosecond() == 0
+}
+
+// earliestLocalInstant also considers the other side of a fall-back
+// transition. time.Date deliberately leaves which duplicate instant it
+// chooses unspecified, so selecting by instant here keeps the CLI behavior
+// stable across Go versions and time zones.
+func earliestLocalInstant(parsed time.Time, year int, month time.Month, day, hour, minute, second int, location *time.Location) time.Time {
+	wall := time.Date(year, month, day, hour, minute, second, 0, time.UTC)
+	offsets := make(map[int]struct{})
+	for _, delta := range []time.Duration{
+		-72 * time.Hour, -48 * time.Hour, -36 * time.Hour, -24 * time.Hour,
+		-12 * time.Hour, -6 * time.Hour, -3 * time.Hour, -2 * time.Hour,
+		-time.Hour, -30 * time.Minute, 0, 30 * time.Minute, time.Hour,
+		2 * time.Hour, 3 * time.Hour, 6 * time.Hour, 12 * time.Hour,
+		24 * time.Hour, 36 * time.Hour, 48 * time.Hour, 72 * time.Hour,
+	} {
+		_, offset := parsed.Add(delta).Zone()
+		offsets[offset] = struct{}{}
+	}
+
+	best := parsed
+	for offset := range offsets {
+		candidate := wall.Add(-time.Duration(offset) * time.Second).In(location)
+		if sameLocalDateTime(candidate, year, month, day, hour, minute, second) && candidate.Before(best) {
+			best = candidate
+		}
+	}
+	return best
+}
+
+type deadlineMonitorState struct {
+	done chan struct{}
+
+	stopOnce  sync.Once
+	mu        sync.Mutex
+	stopped   bool
+	stopTimer func()
+}
+
+func (state *deadlineMonitorState) arm(stopTimer func()) bool {
+	state.mu.Lock()
+	if state.stopped {
+		state.mu.Unlock()
+		if stopTimer != nil {
+			stopTimer()
+		}
+		return false
+	}
+	state.stopTimer = stopTimer
+	state.mu.Unlock()
+	return true
+}
+
+func (state *deadlineMonitorState) disarm() {
+	state.mu.Lock()
+	stopTimer := state.stopTimer
+	state.stopTimer = nil
+	state.mu.Unlock()
+	if stopTimer != nil {
+		stopTimer()
+	}
+}
+
+func (state *deadlineMonitorState) stop() {
+	state.stopOnce.Do(func() {
+		state.mu.Lock()
+		state.stopped = true
+		stopTimer := state.stopTimer
+		state.stopTimer = nil
+		state.mu.Unlock()
+		close(state.done)
+		if stopTimer != nil {
+			stopTimer()
+		}
+	})
+}
+
+func releaseChannelReady(release <-chan struct{}) bool {
+	if release == nil {
+		return false
+	}
+	select {
+	case <-release:
+		return true
+	default:
+		return false
+	}
+}
+
+func startDeadlineMonitor(deadline *time.Time, now func() time.Time, coordinator *releaseCoordinator, newTimer func(time.Duration) (<-chan time.Time, func())) func() {
+	if deadline == nil || coordinator == nil || releaseChannelReady(coordinator.release) {
+		return nil
+	}
+	if now == nil {
+		now = time.Now
+	}
+	current := now()
+	wait := deadline.Sub(current)
+	if wait <= 0 {
+		// An already elapsed deadline is an immediately satisfied release
+		// condition. Initial file probes have completed before this function is
+		// called, so their fatal results still retain precedence.
+		_ = coordinator.requestOpen()
+		return nil
+	}
+	if newTimer == nil {
+		newTimer = defaultRuntimeClock().newTimer
+	}
+
+	// Arm the first timer synchronously. This ensures the absolute deadline
+	// is active before executeWithClock invokes readiness hooks or starts the
+	// first stdin read.
+	state := &deadlineMonitorState{done: make(chan struct{})}
+	current = now()
+	wait = deadline.Sub(current)
+	if wait <= 0 {
+		_ = coordinator.requestOpen()
+		return nil
+	}
+	capped := false
+	if !current.Add(wait).Equal(*deadline) {
+		wait = time.Duration(1<<63 - 1)
+		capped = true
+	}
+	timerC, stopTimer := newTimer(wait)
+	if timerC == nil {
+		if stopTimer != nil {
+			stopTimer()
+		}
+		return nil
+	}
+	if !state.arm(stopTimer) {
+		return nil
+	}
+
+	go func() {
+		for {
+			select {
+			case <-timerC:
+				state.disarm()
+				if !capped {
+					_ = coordinator.requestOpen()
+					return
+				}
+				if releaseChannelReady(coordinator.release) {
+					return
+				}
+				current := now()
+				wait := deadline.Sub(current)
+				if wait <= 0 {
+					_ = coordinator.requestOpen()
+					return
+				}
+				capped = false
+				if !current.Add(wait).Equal(*deadline) {
+					wait = time.Duration(1<<63 - 1)
+					capped = true
+				}
+				timerC, stopTimer = newTimer(wait)
+				if timerC == nil {
+					if stopTimer != nil {
+						stopTimer()
+					}
+					return
+				}
+				if !state.arm(stopTimer) {
+					return
+				}
+			case <-coordinator.release:
+				state.disarm()
+				return
+			case <-state.done:
+				state.disarm()
+				return
+			}
+		}
+	}()
+	return state.stop
 }
 
 func parseBufferSize(value string) (int, error) {

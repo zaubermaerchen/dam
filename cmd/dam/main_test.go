@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"reflect"
@@ -20,17 +21,18 @@ const (
 )
 
 const expectedHelpText = `Usage:
-  dam DURATION [--buffer-size SIZE]
-  dam [DURATION] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
+  dam DEADLINE [--buffer-size SIZE]
+  dam [DEADLINE] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
   dam --help
   dam --version
 
 Hold pipeline output until a release condition is met.
 
 Arguments:
-  DURATION
-        Start the release timer after stdin's first non-empty read completes.
-        Uses Go duration syntax, such as 500ms, 3s, or 2m.
+  DEADLINE
+        A relative Go duration (such as 500ms, 3s, or 2m) starts after the
+        first non-empty stdin read. An absolute local datetime in
+        YYYY-MM-DDTHH:MM[:SS] form is monitored from startup in local time.
 
 Options:
   --release-on TYPE:SOURCE
@@ -595,6 +597,417 @@ func TestParseConfigAcceptsSignalWithoutDuration(t *testing.T) {
 	}
 	if got, want := config.signals, []string{"SIGUSR1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestParseConfigAcceptsAbsoluteLocalDeadline(t *testing.T) {
+	location := time.FixedZone("test", 9*60*60)
+	config, err := parseConfigAt([]string{"2026-12-31T23:59"}, location)
+	if err != nil {
+		t.Fatalf("parseConfigAt returned error: %v", err)
+	}
+	if config.delay != nil {
+		t.Fatalf("delay = %v, want nil", config.delay)
+	}
+	if config.deadline == nil {
+		t.Fatal("deadline = nil, want absolute deadline")
+	}
+	want := time.Date(2026, time.December, 31, 23, 59, 0, 0, location)
+	if !config.deadline.Equal(want) {
+		t.Fatalf("deadline = %s, want %s", config.deadline, want)
+	}
+}
+
+func TestParseConfigAcceptsAbsoluteDeadlineWithSeconds(t *testing.T) {
+	config, err := parseConfigAt([]string{"2026-12-31T23:59:07"}, time.UTC)
+	if err != nil {
+		t.Fatalf("parseConfigAt returned error: %v", err)
+	}
+	if config.deadline == nil {
+		t.Fatal("deadline = nil, want absolute deadline")
+	}
+	if got, want := config.deadline.Second(), 7; got != want {
+		t.Fatalf("deadline second = %d, want %d", got, want)
+	}
+}
+
+func TestParseConfigAcceptsAbsoluteDeadlineYearBoundaries(t *testing.T) {
+	for _, value := range []string{"0001-01-01T00:00", "9999-12-31T23:59:59"} {
+		t.Run(value, func(t *testing.T) {
+			config, err := parseConfigAt([]string{value}, time.UTC)
+			if err != nil {
+				t.Fatalf("parseConfigAt returned error: %v", err)
+			}
+			if config.deadline == nil {
+				t.Fatal("deadline = nil, want absolute deadline")
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsMalformedAbsoluteDeadlines(t *testing.T) {
+	for _, value := range []string{
+		"0000-01-01T00:00",
+		"2026-02-29T12:00",
+		"2026-12-31T24:00",
+		"2026-12-31T23:59:60",
+		"2026-12-31t23:59",
+		"2026-12-31 23:59",
+		"2026-12-31T23:xx",
+		"2026-12-31T23:59.1",
+		"2026-12-31T23:59Z",
+		"2026-12-31T23:59+09:00",
+	} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := parseConfigAt([]string{value}, time.UTC); err == nil {
+				t.Fatal("parseConfigAt unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsMultipleKindsOfDeadlines(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"1s", "2026-12-31T23:59"}, want: "multiple deadlines are not allowed"},
+		{args: []string{"2026-12-31T23:59", "1s"}, want: "multiple deadlines are not allowed"},
+		{args: []string{"2026-12-31T23:59", "2027-01-01T00:00"}, want: "multiple deadlines are not allowed"},
+	} {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			_, err := parseConfigAt(test.args, time.UTC)
+			if err == nil {
+				t.Fatal("parseConfigAt unexpectedly succeeded")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %q, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseAbsoluteDeadlineUsesEarlierInstantForDSTOverlap(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("load timezone: %v", err)
+	}
+	got, err := parseAbsoluteDeadline("2024-11-03T01:30", location)
+	if err != nil {
+		t.Fatalf("parseAbsoluteDeadline returned error: %v", err)
+	}
+	want := time.Date(2024, time.November, 3, 1, 30, 0, 0, time.FixedZone("EDT", -4*60*60))
+	if !got.Equal(want) {
+		t.Fatalf("deadline = %s (%s), want %s (%s)", got, got.UTC(), want, want.UTC())
+	}
+}
+
+func TestEarliestLocalInstantFindsShortLivedHistoricalOffset(t *testing.T) {
+	location, err := time.LoadLocationFromTZData("Synthetic/Short", shortLivedOffsetTZif(t))
+	if err != nil {
+		t.Fatalf("load synthetic timezone: %v", err)
+	}
+	parsed := time.Unix(30, 0).In(location)
+	if !sameLocalDateTime(parsed, 1970, time.January, 1, 0, 0, 0) {
+		t.Fatalf("later occurrence = %s, want 1970-01-01T00:00:00", parsed)
+	}
+
+	got := earliestLocalInstant(parsed, 1970, time.January, 1, 0, 0, 0, location)
+	want := time.Unix(0, 0).In(location)
+	if !got.Equal(want) {
+		t.Fatalf("earliest occurrence = %s (%s), want %s (%s)", got, got.UTC(), want, want.UTC())
+	}
+}
+
+func TestParseAbsoluteDeadlineHandlesTransitionAtZeroTime(t *testing.T) {
+	location, err := time.LoadLocationFromTZData("Synthetic/Zero", zeroTimeTransitionTZif(t))
+	if err != nil {
+		t.Fatalf("load synthetic timezone: %v", err)
+	}
+
+	got, err := parseAbsoluteDeadline("0001-01-01T00:00:00", location)
+	if err != nil {
+		t.Fatalf("parseAbsoluteDeadline returned error: %v", err)
+	}
+	want := time.Date(1, time.January, 1, 0, 0, -30, 0, time.UTC).In(location)
+	if !got.Equal(want) {
+		t.Fatalf("earliest occurrence = %s (%s), want %s (%s)", got, got.UTC(), want, want.UTC())
+	}
+}
+
+func shortLivedOffsetTZif(t *testing.T) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	data.WriteString("TZif")
+	data.Write(make([]byte, 16))
+	for _, count := range []uint32{0, 0, 0, 3, 4, 8} {
+		if err := binary.Write(&data, binary.BigEndian, count); err != nil {
+			t.Fatalf("write TZif header: %v", err)
+		}
+	}
+	for _, transition := range []int32{-20, 10, 20} {
+		if err := binary.Write(&data, binary.BigEndian, transition); err != nil {
+			t.Fatalf("write TZif transition: %v", err)
+		}
+	}
+	data.Write([]byte{1, 2, 3})
+	for _, zone := range []struct {
+		offset int32
+		name   byte
+	}{
+		{offset: -7200, name: 0},
+		{offset: 0, name: 2},
+		{offset: 36000, name: 4},
+		{offset: -30, name: 6},
+	} {
+		if err := binary.Write(&data, binary.BigEndian, zone.offset); err != nil {
+			t.Fatalf("write TZif offset: %v", err)
+		}
+		data.WriteByte(0)
+		data.WriteByte(zone.name)
+	}
+	data.WriteString("D\x00A\x00B\x00C\x00")
+	return data.Bytes()
+}
+
+func zeroTimeTransitionTZif(t *testing.T) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	writeTZifHeader(t, &data, '2', 0, 1, 2)
+	writeTZifZone(t, &data, 0, 0)
+	data.WriteString("X\x00")
+
+	writeTZifHeader(t, &data, '2', 1, 2, 4)
+	if err := binary.Write(&data, binary.BigEndian, int64(-62135596800)); err != nil {
+		t.Fatalf("write TZif transition: %v", err)
+	}
+	data.WriteByte(1)
+	writeTZifZone(t, &data, 30, 0)
+	writeTZifZone(t, &data, 0, 2)
+	data.WriteString("A\x00B\x00")
+	data.WriteString("\n\n")
+	return data.Bytes()
+}
+
+func writeTZifHeader(t *testing.T, data *bytes.Buffer, version byte, transitions, zones, names uint32) {
+	t.Helper()
+	data.WriteString("TZif")
+	data.WriteByte(version)
+	data.Write(make([]byte, 15))
+	for _, count := range []uint32{0, 0, 0, transitions, zones, names} {
+		if err := binary.Write(data, binary.BigEndian, count); err != nil {
+			t.Fatalf("write TZif header: %v", err)
+		}
+	}
+}
+
+func writeTZifZone(t *testing.T, data *bytes.Buffer, offset int32, name byte) {
+	t.Helper()
+	if err := binary.Write(data, binary.BigEndian, offset); err != nil {
+		t.Fatalf("write TZif offset: %v", err)
+	}
+	data.WriteByte(0)
+	data.WriteByte(name)
+}
+
+func TestParseAbsoluteDeadlineRejectsDSTGap(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("load timezone: %v", err)
+	}
+	if _, err := parseAbsoluteDeadline("2024-03-10T02:30", location); err == nil {
+		t.Fatal("parseAbsoluteDeadline unexpectedly accepted a DST gap")
+	}
+}
+
+func TestRunAbsoluteDeadlineReleasesBeforeFirstInput(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	timerFired := make(chan time.Time, 1)
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			return timerFired, func() {}
+		},
+	}
+	input := &firstReadGate{
+		data:    []byte("deadline-opened"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	var diagnostics bytes.Buffer
+	status := make(chan int, 1)
+	go func() {
+		status <- runWithClock([]string{"2026-01-02T03:04:05"}, input, output, &diagnostics, clock)
+	}()
+
+	select {
+	case <-input.started:
+	case <-time.After(testTimeout):
+		t.Fatal("run did not attempt the first read")
+	}
+	timerFired <- now
+	select {
+	case <-output.writeTimes:
+		t.Fatal("deadline wrote output before the blocked first read completed")
+	default:
+	}
+	close(input.release)
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Fatalf("run status = %d, diagnostics = %q", got, diagnostics.String())
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("run did not complete after deadline release")
+	}
+	if got, want := output.String(), "deadline-opened"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestRunPastAbsoluteDeadlineReleasesImmediately(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	timerCreated := false
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			timerCreated = true
+			return make(chan time.Time), func() {}
+		},
+	}
+	var output, diagnostics bytes.Buffer
+	status := runWithClock([]string{"2026-01-02T03:03:00"}, strings.NewReader("past"), &output, &diagnostics, clock)
+	if status != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
+	}
+	if got, want := output.String(), "past"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if timerCreated {
+		t.Fatal("past absolute deadline unexpectedly created a timer")
+	}
+}
+
+func TestRunPastAbsoluteDeadlineDoesNotOverrideInitialFileFatal(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: time.UTC,
+	}
+	input := &trackingReader{}
+	var output, diagnostics bytes.Buffer
+	status := runWithClock([]string{
+		"2026-01-02T03:03:00",
+		"--release-on=file:" + t.TempDir(),
+	}, input, &output, &diagnostics, clock)
+	if status == 0 {
+		t.Fatal("directory release condition unexpectedly succeeded")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("fatal initial probe wrote stdout: %q", output.String())
+	}
+	if diagnostics.Len() == 0 {
+		t.Fatal("fatal initial probe produced no diagnostics")
+	}
+	if input.reads != 0 {
+		t.Fatalf("fatal initial probe read stdin %d times", input.reads)
+	}
+}
+
+func TestRunEmptyInputDoesNotWaitForAbsoluteDeadline(t *testing.T) {
+	clock := runtimeClock{
+		now:      func() time.Time { return time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC) },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			return make(chan time.Time), func() {}
+		},
+	}
+	var output, diagnostics bytes.Buffer
+	status := make(chan int, 1)
+	go func() {
+		status <- runWithClock([]string{"2026-01-03T03:04"}, strings.NewReader(""), &output, &diagnostics, clock)
+	}()
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Fatalf("run status = %d, diagnostics = %q", got, diagnostics.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("empty input waited for absolute deadline")
+	}
+}
+
+func TestStartDeadlineMonitorArmsBeforeReturning(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	deadline := now.Add(time.Minute)
+	coordinator := newReleaseCoordinator(false)
+	armed := make(chan struct{}, 1)
+	timerC := make(chan time.Time)
+	stop := startDeadlineMonitor(&deadline, func() time.Time { return now }, coordinator, func(time.Duration) (<-chan time.Time, func()) {
+		armed <- struct{}{}
+		return timerC, func() {}
+	})
+	if stop == nil {
+		t.Fatal("startDeadlineMonitor returned nil cleanup for a future deadline")
+	}
+	select {
+	case <-armed:
+	default:
+		t.Fatal("startDeadlineMonitor returned before arming its timer")
+	}
+	stop()
+}
+
+func TestStartDeadlineMonitorStopsWhenCoordinatorOpens(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	deadline := now.Add(time.Minute)
+	coordinator := newReleaseCoordinator(false)
+	timerC := make(chan time.Time)
+	armed := make(chan struct{}, 1)
+	stopped := make(chan struct{})
+	stop := startDeadlineMonitor(&deadline, func() time.Time { return now }, coordinator, func(time.Duration) (<-chan time.Time, func()) {
+		armed <- struct{}{}
+		return timerC, func() { close(stopped) }
+	})
+	if stop == nil {
+		t.Fatal("startDeadlineMonitor returned nil cleanup for a future deadline")
+	}
+	select {
+	case <-armed:
+	case <-time.After(testTimeout):
+		t.Fatal("startDeadlineMonitor did not arm its timer")
+	}
+	if err := coordinator.requestOpen(); err != nil {
+		t.Fatalf("requestOpen returned error: %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(testTimeout):
+		t.Fatal("deadline timer was not stopped after another condition opened the gate")
+	}
+	stop()
+}
+
+func TestStartDeadlineMonitorSkipsAlreadyOpenCoordinator(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	deadline := now.Add(time.Minute)
+	coordinator := newReleaseCoordinator(false)
+	if err := coordinator.requestOpen(); err != nil {
+		t.Fatalf("requestOpen returned error: %v", err)
+	}
+	armed := false
+	stop := startDeadlineMonitor(&deadline, func() time.Time { return now }, coordinator, func(time.Duration) (<-chan time.Time, func()) {
+		armed = true
+		return make(chan time.Time), func() {}
+	})
+	if stop != nil {
+		t.Fatal("startDeadlineMonitor returned cleanup for an already-open coordinator")
+	}
+	if armed {
+		t.Fatal("startDeadlineMonitor armed a timer for an already-open coordinator")
 	}
 }
 

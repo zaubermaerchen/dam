@@ -294,8 +294,7 @@ func (m *fileMonitor) watchPath(path string) {
 		}
 		ready, err := m.probe(path)
 		if errors.Is(err, fs.ErrNotExist) {
-			interval = nextFilePollInterval(interval)
-			continue
+			ready, err = false, nil
 		}
 		if err != nil {
 			m.coordinator.reportFatal(err)

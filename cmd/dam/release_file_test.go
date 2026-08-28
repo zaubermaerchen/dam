@@ -5,10 +5,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -316,6 +318,383 @@ func TestFileMonitorTreatsWrappedNotExistAsPending(t *testing.T) {
 	}
 }
 
+func TestNextFilePollIntervalDoublesAndCaps(t *testing.T) {
+	interval := filePollInterval
+	for _, want := range []time.Duration{
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		250 * time.Millisecond,
+		250 * time.Millisecond,
+	} {
+		interval = nextFilePollInterval(interval)
+		if interval != want {
+			t.Fatalf("nextFilePollInterval = %v, want %v", interval, want)
+		}
+	}
+}
+
+func TestFileMonitorUsesAdaptiveBackoffAfterPendingProbe(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	wantDelays := []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		250 * time.Millisecond,
+		250 * time.Millisecond,
+	}
+	var (
+		mu     sync.Mutex
+		delays []time.Duration
+	)
+	done := make(chan struct{})
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		probe: func(string) (bool, error) {
+			return false, nil
+		},
+		interval: filePollInterval,
+		wait: func(_ string, _ <-chan struct{}, delay time.Duration) bool {
+			mu.Lock()
+			delays = append(delays, delay)
+			last := len(delays) == len(wantDelays)
+			mu.Unlock()
+			if last {
+				coordinator.stopFiles()
+				return false
+			}
+			return true
+		},
+	}
+	go func() {
+		monitor.watchPath("missing")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("adaptive file watcher did not stop")
+	}
+	mu.Lock()
+	got := slices.Clone(delays)
+	mu.Unlock()
+	if !equalDurations(got, wantDelays) {
+		t.Fatalf("poll delays = %v, want %v", got, wantDelays)
+	}
+}
+
+func TestFileMonitorTreatsWrappedNotExistDuringPollingAsPending(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	t.Cleanup(coordinator.stopFiles)
+	waits := make(chan time.Duration, 2)
+	calls := 0
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		interval:    filePollInterval,
+		wait: func(_ string, stop <-chan struct{}, delay time.Duration) bool {
+			select {
+			case waits <- delay:
+			case <-stop:
+				return false
+			}
+			if delay == 2*filePollInterval {
+				coordinator.stopFiles()
+				return false
+			}
+			return true
+		},
+		probe: func(string) (bool, error) {
+			calls++
+			return false, fmt.Errorf("probe missing: %w", fs.ErrNotExist)
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		monitor.watchPath("missing")
+		close(done)
+	}()
+	select {
+	case delay := <-waits:
+		if delay != filePollInterval {
+			t.Fatalf("first poll delay = %v, want %v", delay, filePollInterval)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("first poll was not scheduled")
+	}
+	select {
+	case delay := <-waits:
+		if delay != 2*filePollInterval {
+			t.Fatalf("wrapped not-exist next poll delay = %v, want %v", delay, 2*filePollInterval)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("wrapped not-exist did not schedule a next poll")
+	}
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("file watcher did not stop")
+	}
+	if calls != 1 {
+		t.Fatalf("probe calls = %d, want 1", calls)
+	}
+	if err := coordinator.fatalError(); err != nil {
+		t.Fatalf("fatalError = %v, want nil", err)
+	}
+}
+
+func TestFileMonitorWaitsForProbeCompletionBeforeNextBackoff(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	probeStarted := make(chan struct{})
+	allowProbe := make(chan struct{})
+	waitCalls := make(chan time.Duration, 2)
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		interval:    filePollInterval,
+		wait: func(_ string, _ <-chan struct{}, delay time.Duration) bool {
+			waitCalls <- delay
+			if delay == 2*filePollInterval {
+				coordinator.stopFiles()
+				return false
+			}
+			return true
+		},
+		probe: func(string) (bool, error) {
+			close(probeStarted)
+			<-allowProbe
+			return false, nil
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		monitor.watchPath("missing")
+		close(done)
+	}()
+	select {
+	case delay := <-waitCalls:
+		if delay != filePollInterval {
+			t.Fatalf("first poll delay = %v, want %v", delay, filePollInterval)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("first poll was not scheduled")
+	}
+	select {
+	case <-probeStarted:
+	case <-time.After(testTimeout):
+		t.Fatal("probe did not start")
+	}
+	select {
+	case delay := <-waitCalls:
+		t.Fatalf("next poll was scheduled before probe completed, delay %v", delay)
+	default:
+	}
+	close(allowProbe)
+	select {
+	case delay := <-waitCalls:
+		if delay != 2*filePollInterval {
+			t.Fatalf("second poll delay = %v, want %v", delay, 2*filePollInterval)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("second poll was not scheduled after probe completion")
+	}
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("file watcher did not stop")
+	}
+}
+
+func TestFileMonitorStopsWhileBackedOff(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		stop func(*releaseCoordinator, error)
+	}{
+		{
+			name: "open",
+			stop: func(coordinator *releaseCoordinator, _ error) {
+				if err := coordinator.requestOpen(); err != nil {
+					panic(err)
+				}
+			},
+		},
+		{
+			name: "fatal",
+			stop: func(coordinator *releaseCoordinator, fatal error) {
+				coordinator.reportFatal(fatal)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := newReleaseCoordinator(false)
+			backedOff := make(chan struct{})
+			var waits int
+			var mu sync.Mutex
+			fatal := errors.New("backoff fatal")
+			monitor := &fileMonitor{
+				coordinator: coordinator,
+				interval:    filePollInterval,
+				wait: func(_ string, stop <-chan struct{}, _ time.Duration) bool {
+					mu.Lock()
+					waits++
+					current := waits
+					mu.Unlock()
+					if current == 2 {
+						close(backedOff)
+						<-stop
+						return false
+					}
+					return true
+				},
+				probe: func(string) (bool, error) {
+					return false, nil
+				},
+			}
+			done := make(chan struct{})
+			go func() {
+				monitor.watchPath("missing")
+				close(done)
+			}()
+			select {
+			case <-backedOff:
+			case <-time.After(testTimeout):
+				t.Fatal("file watcher did not enter backoff")
+			}
+			test.stop(coordinator, fatal)
+			select {
+			case <-done:
+			case <-time.After(testTimeout):
+				t.Fatal("file watcher did not stop after coordinator transition")
+			}
+			if test.name == "fatal" && !errors.Is(coordinator.fatalError(), fatal) {
+				t.Fatalf("fatalError = %v, want %v", coordinator.fatalError(), fatal)
+			}
+		})
+	}
+}
+
+func TestFileMonitorIgnoresInFlightProbeAfterStop(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	probeStarted := make(chan struct{})
+	allowProbe := make(chan struct{})
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		interval:    filePollInterval,
+		wait: func(_ string, _ <-chan struct{}, _ time.Duration) bool {
+			return true
+		},
+		probe: func(string) (bool, error) {
+			close(probeStarted)
+			<-allowProbe
+			return true, nil
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		monitor.watchPath("ready")
+		close(done)
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(testTimeout):
+		t.Fatal("probe did not start")
+	}
+	if err := coordinator.completeEmpty(); err != nil {
+		t.Fatalf("completeEmpty returned error: %v", err)
+	}
+	close(allowProbe)
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("file watcher did not stop after in-flight probe")
+	}
+	select {
+	case <-coordinator.release:
+		t.Fatal("in-flight ready result opened the stopped coordinator")
+	default:
+	}
+	if err := coordinator.fatalError(); err != nil {
+		t.Fatalf("in-flight probe reported fatal error: %v", err)
+	}
+}
+
+func TestFileMonitorMaintainsIndependentBackoffPerPath(t *testing.T) {
+	coordinator := newReleaseCoordinator(false)
+	t.Cleanup(coordinator.stopFiles)
+	want := []time.Duration{filePollInterval, 2 * filePollInterval}
+	type pollRequest struct {
+		path  string
+		delay time.Duration
+		allow chan bool
+	}
+	paths := []string{"first", "second"}
+	requests := make(chan pollRequest, len(paths)*len(want))
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		interval:    filePollInterval,
+		wait: func(path string, stop <-chan struct{}, delay time.Duration) bool {
+			allow := make(chan bool)
+			select {
+			case requests <- pollRequest{path: path, delay: delay, allow: allow}:
+			case <-stop:
+				return false
+			}
+			select {
+			case allowed := <-allow:
+				return allowed
+			case <-stop:
+				return false
+			}
+		},
+		probe: func(string) (bool, error) {
+			return false, nil
+		},
+	}
+	var wg sync.WaitGroup
+	for _, path := range paths {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			monitor.watchPath(path)
+		}()
+	}
+	delays := make(map[string][]time.Duration)
+	for range 4 {
+		var request pollRequest
+		select {
+		case request = <-requests:
+		case <-time.After(testTimeout):
+			t.Fatal("timed out waiting for independent poll request")
+		}
+		pathDelays := delays[request.path]
+		index := len(pathDelays)
+		if index >= len(want) {
+			t.Fatalf("received too many poll requests for %q", request.path)
+		}
+		if request.delay != want[index] {
+			t.Fatalf("poll delay for %q = %v, want %v", request.path, request.delay, want[index])
+		}
+		delays[request.path] = append(pathDelays, request.delay)
+		request.allow <- index == 0
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("file watchers did not stop")
+	}
+	for _, path := range paths {
+		if !equalDurations(delays[path], want) {
+			t.Fatalf("poll delays for %q = %v, want %v", path, delays[path], want)
+		}
+	}
+}
+
 func TestFileReleaseStopsAfterOpen(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ready")
@@ -399,12 +778,16 @@ func TestReleaseCoordinatorEmptyCompletionStopsAndWinsOverLateFatal(t *testing.T
 	}
 }
 
-func TestFileMonitorSkipsProbeWhenStopArrivesAfterTick(t *testing.T) {
+func TestFileMonitorSkipsProbeWhenStopArrivesAfterPollWait(t *testing.T) {
 	coordinator := newReleaseCoordinator(false)
-	ticks := make(chan time.Time, 1)
 	probeCalled := make(chan struct{}, 1)
 	monitor := &fileMonitor{
 		coordinator: coordinator,
+		interval:    filePollInterval,
+		wait: func(_ string, _ <-chan struct{}, _ time.Duration) bool {
+			coordinator.stopFiles()
+			return true
+		},
 		probe: func(string) (bool, error) {
 			probeCalled <- struct{}{}
 			return false, nil
@@ -412,12 +795,9 @@ func TestFileMonitorSkipsProbeWhenStopArrivesAfterTick(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		monitor.watchPathWithTicks("ready", ticks, func() {
-			coordinator.stopFiles()
-		})
+		monitor.watchPath("ready")
 		close(done)
 	}()
-	ticks <- time.Now()
 
 	select {
 	case <-done:
@@ -655,6 +1035,18 @@ func TestForwardDelayedReportsClosedFailureChannel(t *testing.T) {
 }
 
 func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalDurations(got, want []time.Duration) bool {
 	if len(got) != len(want) {
 		return false
 	}

@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const filePollInterval = 10 * time.Millisecond
+const (
+	filePollInterval    = 10 * time.Millisecond
+	filePollMaxInterval = 250 * time.Millisecond
+)
 
 // releaseCoordinator serializes release and fatal file-monitor observations.
 // The mutex makes the OPEN/error boundary deterministic: a fatal result that
@@ -166,6 +169,23 @@ type fileMonitor struct {
 	paths       []string
 	probe       fileProbe
 	interval    time.Duration
+	wait        filePollWait
+}
+
+// filePollWait waits for one poll interval or for monitoring to stop. Tests
+// inject this operation so backoff sequencing can be verified without
+// depending on wall-clock scheduling.
+type filePollWait func(path string, stop <-chan struct{}, delay time.Duration) bool
+
+func nextFilePollInterval(interval time.Duration) time.Duration {
+	if interval >= filePollMaxInterval {
+		return filePollMaxInterval
+	}
+	next := interval * 2
+	if next <= interval || next >= filePollMaxInterval {
+		return filePollMaxInterval
+	}
+	return next
 }
 
 func newFileMonitor(paths []string, coordinator *releaseCoordinator) (*fileMonitor, error) {
@@ -257,43 +277,48 @@ func (m *fileMonitor) Close() {
 }
 
 func (m *fileMonitor) watchPath(path string) {
-	ticker := time.NewTicker(m.interval)
-	defer ticker.Stop()
-	m.watchPathWithTicks(path, ticker.C, nil)
-}
-
-func (m *fileMonitor) watchPathWithTicks(path string, ticks <-chan time.Time, beforeProbe func()) {
 	if monitoringStopped(m.coordinator.files) {
 		return
 	}
 
+	interval := m.interval
 	for {
-		select {
-		case <-m.coordinator.files:
+		if !m.waitForPoll(path, interval) {
 			return
-		case <-ticks:
-			if beforeProbe != nil {
-				beforeProbe()
-			}
-			// Recheck the stopped state under the coordinator mutex before the
-			// probe. OPEN/EOF may still race after this check; that probe's result
-			// is then ignored.
-			if !m.coordinator.beginFileProbe() {
-				return
-			}
-			ready, err := m.probe(path)
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				m.coordinator.reportFatal(err)
-				return
-			}
-			if ready {
-				_ = m.coordinator.requestOpen()
-				return
-			}
 		}
+		// Recheck the stopped state under the coordinator mutex before the
+		// probe. OPEN/EOF may still race after this check; that probe's result
+		// is then ignored.
+		if !m.coordinator.beginFileProbe() {
+			return
+		}
+		ready, err := m.probe(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			ready, err = false, nil
+		}
+		if err != nil {
+			m.coordinator.reportFatal(err)
+			return
+		}
+		if ready {
+			_ = m.coordinator.requestOpen()
+			return
+		}
+		interval = nextFilePollInterval(interval)
+	}
+}
+
+func (m *fileMonitor) waitForPoll(path string, interval time.Duration) bool {
+	if m.wait != nil {
+		return m.wait(path, m.coordinator.files, interval)
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-m.coordinator.files:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

@@ -1,15 +1,40 @@
 # dam
 
-`dam` is a startup gate for Unix pipelines. It starts a timer when the first
+`dam` is a release gate for Unix pipelines. It starts a timer when the first
 non-empty read from standard input completes, holds the beginning of the stream
 for the requested duration, and then forwards the stream unchanged. The gate
 can also be opened by an absolute local datetime, `SIGUSR1`, `SIGUSR2`, or the
-presence of a regular file. It also reports its version to stdout without
-reading standard input.
+presence of a regular file. It is a one-way startup gate: once released, it
+stays open for the rest of the stream. It also reports its version to stdout
+without reading standard input.
 
 ```text
 producer | dam 3s | consumer
 ```
+
+## Choosing a tool
+
+Several Unix tools control when commands run or data becomes available, but
+they serve different purposes:
+
+| Tool | Primary purpose | Producer can start immediately? | What determines downstream availability? |
+| --- | --- | --- | --- |
+| `at` | Schedule command execution | No, for the scheduled command | Scheduled time |
+| `delay` | Apply a constant delay to stream data | Yes | Per-data delay |
+| `sponge` | Read all input before writing output | Yes | EOF |
+| `dam` | Gate a running pipeline | Yes | Configured release condition |
+
+For example:
+
+```bash
+slow-producer | dam 2026-08-30T00:00 | consumer
+```
+
+Here, `slow-producer` starts immediately and can fill `dam`'s bounded buffer,
+with normal pipe backpressure after that. `consumer` receives no data until the
+gate opens at the configured local deadline. Use a command scheduler such as
+`at` instead when the producer itself should not start until the scheduled
+time.
 
 ## Build
 

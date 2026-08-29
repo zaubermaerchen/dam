@@ -23,7 +23,7 @@ go build -o dam ./cmd/dam
 
 ```text
 dam DEADLINE [--buffer-size SIZE]
-dam [DEADLINE] --release-on TYPE:SOURCE [--buffer-size SIZE]
+dam [DEADLINE] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
 dam -h
 dam --help
 dam --version
@@ -57,7 +57,22 @@ read, while an absolute deadline is active from startup and does not wait for
 stdin. The deadline and each `--release-on TYPE:SOURCE` option
 may appear in either order. The release-on option may be repeated and accepts
 both separated (`--release-on signal:USR1`) and equals
-(`--release-on=signal:USR1`) forms. `signal:USR1` and `signal:SIGUSR1` are
+(`--release-on=signal:USR1`) forms. Conditions joined by the exact literal
+` && ` inside one `--release-on` option form an AND group: every member must be
+satisfied. Multiple `--release-on` options are alternatives (OR). For example,
+quote a compound value in a POSIX shell:
+
+```bash
+dam --release-on 'signal:USR1 && file:/tmp/ready'
+```
+
+In PowerShell, single quotes provide the same protection. In `cmd.exe`, use
+double quotes around a compound value, for example
+`dam --release-on "file:C:\ready && signal:USR1"`; shell quoting only affects
+how the argument reaches `dam`, not the condition parser itself.
+
+Each member is latched once satisfied, so a file may be removed after its latch
+is satisfied without closing the gate. `signal:USR1` and `signal:SIGUSR1` are
 equivalent, as are `signal:USR2` and `signal:SIGUSR2`; other types, signal
 names, and casing are invalid. A `file:PATH` condition opens the gate when
 `PATH` names a regular file. The first colon separates the condition type from
@@ -92,15 +107,22 @@ Argument errors do not print the full help text automatically.
   gate only when its target is a regular file. A directory, FIFO, device,
   symlink loop, permission failure, or other file-status error is fatal while
   the gate is closed.
-- Relative duration, absolute deadline, signal, and file conditions are
-  combined with OR: the first satisfied condition opens the gate. No stream
-  data is written to stdout before a release occurs.
+- The positional duration/deadline and each release group are combined with OR:
+  the first satisfied release source opens the gate. Conditions within one
+  `--release-on` value joined by ` && ` are ANDed. No stream data is written to
+  stdout before a release occurs.
 - All initial file checks finish before the first open decision. A fatal result
   from any initial check takes precedence over an existing regular file, `0s`,
   a current or past absolute deadline, or a pending signal. While the gate
   remains closed, a fatal file result that has already been reported to the
   release coordinator also takes precedence over release events pending at the
   same decision point.
+- Startup validates all members before normal stream processing: syntax first,
+  then platform capabilities, then every initial file probe. The initial file
+  probe barrier covers every OR group; an initial fatal is reported in
+  configuration order even if another group is already satisfiable. A signal
+  received while that barrier is running is latched for its group but cannot
+  override an initial fatal.
 - EOF does not open the gate early. Data received before EOF is still held until
   a duration, absolute deadline, signal, or file release. After the initial
   file checks succeed, empty stdin exits successfully without waiting for a

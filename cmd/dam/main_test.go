@@ -37,6 +37,10 @@ Arguments:
 Options:
   --release-on TYPE:SOURCE
         Release when an external condition is met. May be repeated.
+        Conditions joined by " && " inside one --release-on must all be satisfied.
+        Multiple --release-on options are alternatives (OR).
+        Example:
+          dam --release-on 'signal:USR1 && file:/tmp/ready'
 
         Supported conditions:
           signal:USR1, signal:SIGUSR1

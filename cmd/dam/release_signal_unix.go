@@ -17,7 +17,6 @@ import (
 type releaseMonitor struct {
 	release     chan struct{}
 	done        chan struct{}
-	once        sync.Once
 	stop        sync.Once
 	signals     chan os.Signal
 	coordinator *releaseCoordinator
@@ -81,11 +80,22 @@ func resolveReleaseSignals(configured []string) ([]os.Signal, error) {
 func (monitor *releaseMonitor) consumeSignals() {
 	for {
 		select {
-		case <-monitor.signals:
-			monitor.once.Do(func() { _ = monitor.coordinator.requestOpen() })
+		case received := <-monitor.signals:
+			_ = monitor.coordinator.satisfySignal(canonicalReleaseSignal(received))
 		case <-monitor.done:
 			return
 		}
+	}
+}
+
+func canonicalReleaseSignal(received os.Signal) string {
+	switch received {
+	case syscall.SIGUSR1:
+		return "SIGUSR1"
+	case syscall.SIGUSR2:
+		return "SIGUSR2"
+	default:
+		return ""
 	}
 }
 

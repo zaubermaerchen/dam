@@ -38,6 +38,10 @@ Arguments:
 Options:
   --release-on TYPE:SOURCE
         Release when an external condition is met. May be repeated.
+        Conditions joined by " && " inside one --release-on must all be satisfied.
+        Multiple --release-on options are alternatives (OR).
+        Example:
+          dam --release-on 'signal:USR1 && file:/tmp/ready'
 
         Supported conditions:
           signal:USR1, signal:SIGUSR1
@@ -151,7 +155,7 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 		return 1, nil
 	}
 
-	coordinator := newReleaseCoordinator(true)
+	coordinator := newReleaseCoordinatorWithGroups(true, config.groups)
 	monitor, err := newReleaseMonitor(config.signals, coordinator)
 	if err != nil {
 		writeDiagnostic(diagnostics, err)
@@ -193,6 +197,7 @@ type runConfig struct {
 	deadline *time.Time
 	signals  []string
 	files    []string
+	groups   []releaseGroup
 
 	bufferSize int
 }
@@ -212,17 +217,17 @@ func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 			if index == len(args) {
 				return runConfig{}, fmt.Errorf("missing value for --release-on")
 			}
-			condition, err := parseCondition(args[index])
+			group, err := parseReleaseGroup(args[index])
 			if err != nil {
 				return runConfig{}, err
 			}
-			config.addCondition(condition)
+			config.addGroup(group)
 		case strings.HasPrefix(arg, "--release-on="):
-			condition, err := parseCondition(strings.TrimPrefix(arg, "--release-on="))
+			group, err := parseReleaseGroup(strings.TrimPrefix(arg, "--release-on="))
 			if err != nil {
 				return runConfig{}, err
 			}
-			config.addCondition(condition)
+			config.addGroup(group)
 		case arg == "--buffer-size":
 			index++
 			if index == len(args) {
@@ -626,12 +631,36 @@ type releaseCondition struct {
 	source string
 }
 
+type releaseGroup struct {
+	members []releaseCondition
+}
+
 func (config *runConfig) addCondition(condition releaseCondition) {
-	if condition.kind == "signal" {
-		config.signals = append(config.signals, condition.source)
-		return
+	config.addGroup(releaseGroup{members: []releaseCondition{condition}})
+}
+
+func (config *runConfig) addGroup(group releaseGroup) {
+	config.groups = append(config.groups, group)
+	for _, condition := range group.members {
+		if condition.kind == "signal" {
+			config.signals = append(config.signals, condition.source)
+			continue
+		}
+		config.files = append(config.files, condition.source)
 	}
-	config.files = append(config.files, condition.source)
+}
+
+func parseReleaseGroup(value string) (releaseGroup, error) {
+	parts := strings.Split(value, " && ")
+	group := releaseGroup{members: make([]releaseCondition, 0, len(parts))}
+	for _, part := range parts {
+		condition, err := parseCondition(part)
+		if err != nil {
+			return releaseGroup{}, err
+		}
+		group.members = append(group.members, condition)
+	}
+	return group, nil
 }
 
 func parseCondition(value string) (releaseCondition, error) {

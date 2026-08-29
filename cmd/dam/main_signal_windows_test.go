@@ -12,7 +12,11 @@ import (
 )
 
 func TestRunRejectsSignalReleaseOnWindows(t *testing.T) {
-	for _, value := range []string{"signal:USR1", "signal:USR2"} {
+	for _, value := range []string{
+		"signal:USR1",
+		"signal:USR2",
+		"signal:USR1 && file:ready",
+	} {
 		t.Run(value, func(t *testing.T) {
 			var output, diagnostics bytes.Buffer
 			input := &trackingReader{}

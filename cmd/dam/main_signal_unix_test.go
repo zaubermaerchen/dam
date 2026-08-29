@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"syscall"
 	"testing"
@@ -103,6 +104,40 @@ func TestRunSignalSubprocessReleasesOnUSR2BeforeFirstInput(t *testing.T) {
 	}
 	if got := readExactWithTimeout(t, helper.output, len("second")); got != "second" {
 		t.Fatalf("second output = %q, want %q", got, "second")
+	}
+	helper.finish(t)
+}
+
+func TestRunSignalAndFileSubprocessRequiresBothLatchedEvents(t *testing.T) {
+	helper := startSignalHelper(t, "and-signal-file")
+	defer helper.cleanup()
+
+	select {
+	case <-helper.ready:
+	case <-time.After(testTimeout):
+		t.Fatal("helper did not install its signal monitor")
+	}
+	if _, err := io.WriteString(helper.stdin, "held"); err != nil {
+		t.Fatalf("write held input: %v", err)
+	}
+	select {
+	case value := <-helper.output:
+		t.Fatalf("compound condition released before either event: %q", string([]byte{value}))
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := helper.signal(syscall.SIGUSR1); err != nil {
+		t.Fatalf("send SIGUSR1: %v", err)
+	}
+	select {
+	case value := <-helper.output:
+		t.Fatalf("compound condition released after signal only: %q", string([]byte{value}))
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.WriteFile(helper.file, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("create release file: %v", err)
+	}
+	if got := readExactWithTimeout(t, helper.output, len("held")); got != "held" {
+		t.Fatalf("held output = %q, want %q", got, "held")
 	}
 	helper.finish(t)
 }
@@ -350,12 +385,18 @@ type signalHelper struct {
 	diagnostics *bytes.Buffer
 	ready       <-chan struct{}
 	stderrDone  <-chan struct{}
+	file        string
 }
 
 func startSignalHelper(t *testing.T, mode string) *signalHelper {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=TestSignalHelperProcess")
 	cmd.Env = append(os.Environ(), "DAM_SIGNAL_HELPER=1", "DAM_SIGNAL_HELPER_MODE="+mode)
+	file := ""
+	if mode == "and-signal-file" {
+		file = filepath.Join(t.TempDir(), "ready")
+		cmd.Env = append(cmd.Env, "DAM_SIGNAL_HELPER_FILE="+file)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("create stdin pipe: %v", err)
@@ -406,7 +447,7 @@ func startSignalHelper(t *testing.T, mode string) *signalHelper {
 		}
 	}()
 
-	return &signalHelper{cmd: cmd, stdin: stdin, output: output, diagnostics: diagnostics, ready: ready, stderrDone: stderrDone}
+	return &signalHelper{cmd: cmd, stdin: stdin, output: output, diagnostics: diagnostics, ready: ready, stderrDone: stderrDone, file: file}
 }
 
 func (helper *signalHelper) signal(sig os.Signal) error {
@@ -480,6 +521,8 @@ func signalHelperArgs(mode string) []string {
 		return []string{"1h", "--release-on=signal:USR2"}
 	case "zero-usr2":
 		return []string{"0s", "--release-on=signal:USR2"}
+	case "and-signal-file":
+		return []string{"--release-on", "signal:USR1 && file:" + os.Getenv("DAM_SIGNAL_HELPER_FILE")}
 	default:
 		panic("unknown signal helper mode")
 	}

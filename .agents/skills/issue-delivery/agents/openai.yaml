@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Delivery"
+  short_description: "Assess and deliver issues with human approval gates"
+  default_prompt: "Use $issue-delivery to assess and deliver this issue without crossing human approval gates."

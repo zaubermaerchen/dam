@@ -10,6 +10,21 @@ or take it through implementation and review. It coordinates existing
 repository and specialist skills; it does not grant permission to change the
 Issue, publish changes, change PR state, or merge.
 
+## Required skills
+
+This workflow requires the following skills:
+
+- `grilling`: https://github.com/mattpocock/skills/tree/main/skills/productivity/grilling
+- `domain-modeling`: https://github.com/mattpocock/skills/tree/main/skills/engineering/domain-modeling
+- `ponytail`: https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail
+
+Check that all three are available when this workflow starts, or immediately
+before the first phase that needs one. If any required skill is unavailable,
+stop and tell the user which skills are missing, provide the corresponding
+source URLs above as installation candidates, and ask whether they want to
+install them. Do not continue the workflow without the required skills, and do
+not install a skill without the user's explicit permission.
+
 ## Research and specification
 
 Before implementation, inspect the issue and the relevant code, types, tests, documentation, CI configuration, and available history or PR context. Keep three things separate in working notes and reports:
@@ -87,11 +102,24 @@ even when assertions or timeouts fail.
 Before a commit or pull request, use the repository's `go-change-verifier`
 skill when available. Do not ignore a failed or unavailable required check;
 investigate, fix within scope, obtain equivalent evidence such as the required
-CI job, or report the limitation or blocker. Commit, push, or create a Draft PR
-only when the user has explicitly authorized that action. Ready-for-review and
-merge are separate human decision points and require confirmation immediately
-before changing either state. Keep the PR in Draft and include the Issue link,
-scope summary, verification evidence, and any unavailable checks or limitations.
+CI job, or report the limitation or blocker.
+
+When a required check cannot run locally, first determine why and confirm
+whether CI has a job that performs an equivalent check. If it does, report the
+local limitation and the specific CI evidence that could replace it. If
+triggering that CI requires a commit, push, or Draft PR, state the minimum
+publication operations needed and obtain explicit user approval for each
+applicable boundary. After approval, publish only what is needed to trigger the
+equivalent check. Treat the check as pending—not successful—and do not call the
+implementation verified until the corresponding CI job succeeds. If CI cannot
+provide equivalent evidence, report the blocker or limitation and stop.
+
+This verification path does not relax publication gates. Commit, push, or
+create a Draft PR only when the user has explicitly authorized that action.
+Ready-for-review and merge remain separate human decision points and require
+confirmation immediately before changing either state. Keep the PR in Draft
+and include the Issue link, scope summary, verification evidence, and any
+unavailable checks or limitations.
 
 ## Review handling
 

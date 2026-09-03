@@ -78,7 +78,7 @@ func newReleaseCoordinatorWithGroups(initializing bool, groups []releaseGroup) *
 		for memberIndex, condition := range group.members {
 			members[memberIndex] = releaseMemberState{condition: condition}
 			ref := releaseMemberRef{groupIndex: groupIndex, memberIndex: memberIndex}
-			key := releaseConditionKey{kind: condition.kind, source: condition.source}
+			key := releaseConditionKeyFor(condition)
 			conditionIndex[key] = append(conditionIndex[key], ref)
 			if condition.kind == "file" {
 				state := filePaths[condition.source]

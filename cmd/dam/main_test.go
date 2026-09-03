@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -918,6 +920,84 @@ func TestRunPastAbsoluteDeadlineDoesNotOverrideInitialFileFatal(t *testing.T) {
 	}
 	if input.reads != 0 {
 		t.Fatalf("fatal initial probe read stdin %d times", input.reads)
+	}
+}
+
+func TestRunArmsAbsoluteDeadlineBeforeInitialFileProbe(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	var timerCreated, timerStopped bool
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			timerCreated = true
+			return make(chan time.Time), func() { timerStopped = true }
+		},
+	}
+	var output, diagnostics bytes.Buffer
+	status := runWithClock([]string{
+		now.Add(time.Minute).Format("2006-01-02T15:04:05"),
+		"--release-on=file:" + t.TempDir(),
+	}, &trackingReader{}, &output, &diagnostics, clock)
+	if status == 0 {
+		t.Fatal("directory release condition unexpectedly succeeded")
+	}
+	if !timerCreated {
+		t.Fatal("absolute deadline was not armed before initial file probe")
+	}
+	if !timerStopped {
+		t.Fatal("absolute deadline timer was not stopped on initial probe failure")
+	}
+}
+
+func TestRunZeroDurationStopsFileMonitorBeforeReadiness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready")
+	input := &firstReadGate{
+		data:    []byte("zero-opened"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	var diagnostics bytes.Buffer
+	status := make(chan int, 1)
+	ready := make(chan struct{})
+	go func() {
+		got, cleanup := executeWithReady([]string{
+			"0s",
+			"--release-on=file:" + path,
+		}, input, output, &diagnostics, func() {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				diagnostics.WriteString(err.Error())
+			}
+			close(ready)
+		})
+		if cleanup != nil {
+			cleanup()
+		}
+		status <- got
+	}()
+
+	select {
+	case <-ready:
+	case <-time.After(testTimeout):
+		t.Fatal("run did not reach readiness")
+	}
+	select {
+	case got := <-status:
+		t.Fatalf("run completed before input release with status %d, diagnostics = %q", got, diagnostics.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(input.release)
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Fatalf("run status = %d, diagnostics = %q", got, diagnostics.String())
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("zero-duration run did not complete")
+	}
+	if got, want := output.String(), "zero-opened"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 

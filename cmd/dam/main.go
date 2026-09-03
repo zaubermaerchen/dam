@@ -155,38 +155,55 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 		return 1, nil
 	}
 
-	coordinator := newReleaseCoordinatorWithGroups(true, config.groups)
+	coordinator := newReleaseCoordinatorWithGroups(true, config.releaseGroups())
 	monitor, err := newReleaseMonitor(config.signals, coordinator)
 	if err != nil {
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
 	}
+	timedMonitor := newTimedReleaseMonitor(coordinator, clock.now, clock.newTimer)
+	cleanup := func() {
+		timedMonitor.Close()
+		monitor.Close()
+	}
+	// Datetime conditions must be armed before the initial file probes. The
+	// coordinator remains initializing so a due datetime can only become a
+	// pending release; an initial file fatal still wins at the barrier.
+	if err := timedMonitor.startDatetimes(); err != nil {
+		writeDiagnostic(diagnostics, err)
+		cleanup()
+		return 1, cleanup
+	}
 	if len(config.files) > 0 {
 		if _, err := newFileMonitor(config.files, coordinator); err != nil {
 			writeDiagnostic(diagnostics, err)
-			return 1, monitor.Close
+			cleanup()
+			return 1, cleanup
 		}
 	} else if err := coordinator.finishInitial(); err != nil {
 		writeDiagnostic(diagnostics, err)
-		return 1, monitor.Close
+		cleanup()
+		return 1, cleanup
 	}
 	if err := coordinator.fatalError(); err != nil {
 		writeDiagnostic(diagnostics, err)
-		return 1, monitor.Close
+		cleanup()
+		return 1, cleanup
 	}
-	stopDeadline := startDeadlineMonitor(config.deadline, clock.now, coordinator, clock.newTimer)
-	cleanup := func() {
-		if stopDeadline != nil {
-			stopDeadline()
+	if config.delay != nil && *config.delay == 0 {
+		if err := coordinator.satisfyDuration(*config.delay); err != nil {
+			writeDiagnostic(diagnostics, err)
+			cleanup()
+			return 1, cleanup
 		}
-		monitor.Close()
 	}
 	if ready != nil {
 		ready()
 	}
 
-	if err := forwardWithFailureAndBuffer(input, output, config.delay, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty, config.bufferSize); err != nil {
+	if err := forwardWithFailureAndBufferAndStart(input, output, nil, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty, config.bufferSize, timedMonitor.startDurations); err != nil {
 		writeDiagnostic(diagnostics, err)
+		cleanup()
 		return 1, cleanup
 	}
 	return 0, cleanup
@@ -200,6 +217,17 @@ type runConfig struct {
 	groups   []releaseGroup
 
 	bufferSize int
+}
+
+func (config runConfig) releaseGroups() []releaseGroup {
+	groups := slices.Clone(config.groups)
+	if config.delay != nil {
+		groups = append(groups, releaseGroup{members: []releaseCondition{newDurationReleaseCondition(*config.delay)}})
+	}
+	if config.deadline != nil {
+		groups = append(groups, releaseGroup{members: []releaseCondition{newDatetimeReleaseCondition(*config.deadline)}})
+	}
+	return groups
 }
 
 func parseConfig(args []string) (runConfig, error) {
@@ -627,12 +655,22 @@ func parseBufferSize(value string) (int, error) {
 }
 
 type releaseCondition struct {
-	kind   string
-	source string
+	kind     string
+	source   string
+	duration time.Duration
+	deadline time.Time
 }
 
 type releaseGroup struct {
 	members []releaseCondition
+}
+
+func newDurationReleaseCondition(value time.Duration) releaseCondition {
+	return releaseCondition{kind: "duration", source: value.String(), duration: value}
+}
+
+func newDatetimeReleaseCondition(value time.Time) releaseCondition {
+	return releaseCondition{kind: "datetime", source: value.UTC().Format(time.RFC3339Nano), deadline: value}
 }
 
 func (config *runConfig) addCondition(condition releaseCondition) {
@@ -642,11 +680,12 @@ func (config *runConfig) addCondition(condition releaseCondition) {
 func (config *runConfig) addGroup(group releaseGroup) {
 	config.groups = append(config.groups, group)
 	for _, condition := range group.members {
-		if condition.kind == "signal" {
+		switch condition.kind {
+		case "signal":
 			config.signals = append(config.signals, condition.source)
-			continue
+		case "file":
+			config.files = append(config.files, condition.source)
 		}
-		config.files = append(config.files, condition.source)
 	}
 }
 
@@ -709,6 +748,10 @@ func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration,
 }
 
 func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int) error {
+	return forwardWithFailureAndBufferAndStart(input, output, delay, release, failures, open, completeEmpty, bufferSize, nil)
+}
+
+func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int, startDuration func() error) error {
 	if delay != nil && *delay == 0 {
 		if err := failureReady(failures); err != nil {
 			return err
@@ -784,6 +827,11 @@ func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, delay *time.
 			}
 			if err := held.recordRead(result.n); err != nil {
 				return err
+			}
+			if startDuration != nil {
+				if err := startDuration(); err != nil {
+					return err
+				}
 			}
 			if result.err != nil {
 				return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.err)

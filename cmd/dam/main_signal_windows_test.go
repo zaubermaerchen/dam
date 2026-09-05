@@ -20,7 +20,7 @@ func TestRunRejectsSignalReleaseOnWindows(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			var output, diagnostics bytes.Buffer
 			input := &trackingReader{}
-			if status := run([]string{"--release-on=" + value}, input, &output, &diagnostics); status == 0 {
+			if status := run([]string{value}, input, &output, &diagnostics); status == 0 {
 				t.Fatal("signal release unexpectedly succeeded on Windows")
 			}
 			if input.reads != 0 {

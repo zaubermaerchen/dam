@@ -19,11 +19,12 @@ import (
 
 func TestParseConfigAcceptsRepeatableFileConditions(t *testing.T) {
 	config, err := parseConfig([]string{
-		"--release-on=file:relative/path:with-colon",
-		"250ms",
-		"--release-on",
+		"file:relative/path:with-colon",
+		"--or",
+		"duration:250ms",
+		"--or",
 		"file:/tmp/ready",
-		"--release-on=file::",
+		"--or=file::",
 	})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
@@ -39,7 +40,7 @@ func TestParseConfigAcceptsRepeatableFileConditions(t *testing.T) {
 func TestParseConfigRejectsEmptyFilePath(t *testing.T) {
 	for _, arg := range []string{"file:"} {
 		t.Run(arg, func(t *testing.T) {
-			if _, err := parseConfig([]string{"--release-on", arg}); err == nil {
+			if _, err := parseConfig([]string{arg}); err == nil {
 				t.Fatal("parseConfig unexpectedly succeeded")
 			}
 		})
@@ -48,8 +49,8 @@ func TestParseConfigRejectsEmptyFilePath(t *testing.T) {
 
 func TestParseConfigAcceptsFileOnlyAndMixedConditions(t *testing.T) {
 	for _, args := range [][]string{
-		{"--release-on=file:ready"},
-		{"--release-on=file:ready", "--release-on=signal:USR1"},
+		{"file:ready"},
+		{"file:ready", "--or=signal:USR1"},
 	} {
 		if _, err := parseConfig(args); err != nil {
 			t.Fatalf("parseConfig(%q) returned error: %v", args, err)
@@ -58,7 +59,7 @@ func TestParseConfigAcceptsFileOnlyAndMixedConditions(t *testing.T) {
 }
 
 func TestParseConfigPreservesDuplicateFileConditions(t *testing.T) {
-	config, err := parseConfig([]string{"--release-on=file:ready", "--release-on=file:ready"})
+	config, err := parseConfig([]string{"file:ready", "--or=file:ready"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestFileProbeRejectsSymlinkLoop(t *testing.T) {
 func TestFileOnlyInitialFatalPrecedesImmediateRelease(t *testing.T) {
 	input := &trackingReader{}
 	var output, diagnostics bytes.Buffer
-	status := run([]string{"0s", "--release-on=file:" + t.TempDir()}, input, &output, &diagnostics)
+	status := run([]string{"duration:0s", "--or=file:" + t.TempDir()}, input, &output, &diagnostics)
 	if status == 0 {
 		t.Fatal("directory release condition unexpectedly succeeded")
 	}
@@ -178,7 +179,7 @@ func TestFileOnlyEmptyEOFDoesNotWaitForFile(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"--release-on=file:" + filepath.Join(t.TempDir(), "missing")}, strings.NewReader(""), &output, &diagnostics)
+		status <- run([]string{"file:" + filepath.Join(t.TempDir(), "missing")}, strings.NewReader(""), &output, &diagnostics)
 	}()
 	select {
 	case got := <-status:
@@ -197,7 +198,7 @@ func TestFileReleaseHoldsDataUntilFileAppears(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"--release-on=file:" + path}, input, output, &diagnostics)
+		status <- run([]string{"file:" + path}, input, output, &diagnostics)
 	}()
 	select {
 	case <-output.writeTimes:
@@ -228,7 +229,7 @@ func TestFileReleaseFatalWhileClosedSuppressesHeldData(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"--release-on=file:" + path}, input, output, &diagnostics)
+		status <- run([]string{"file:" + path}, input, output, &diagnostics)
 	}()
 	select {
 	case <-output.writeTimes:
@@ -702,7 +703,7 @@ func TestFileReleaseStopsAfterOpen(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"--release-on=file:" + path}, input, &output, &diagnostics)
+		status <- run([]string{"file:" + path}, input, &output, &diagnostics)
 	}()
 
 	select {

@@ -22,34 +22,31 @@ const preReleaseBufferSize = 64 * 1024
 const initialPreReleaseBufferSize = 4 * 1024
 
 const helpText = `Usage:
-  dam DEADLINE [--buffer-size SIZE]
-  dam [DEADLINE] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
+  dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
   dam --help
   dam --version
 
 Hold pipeline output until a release condition is met.
 
 Arguments:
-  DEADLINE
-        A relative Go duration (such as 500ms, 3s, or 2m) starts after the
-        first non-empty stdin read. An absolute local datetime in
-        YYYY-MM-DDTHH:MM[:SS] form is monitored from startup in local time.
+  CONDITION
+        A condition is one of:
+          duration:DURATION
+              A Go duration (such as 500ms, 3s, or 2m) starts after the
+              first non-empty stdin read.
+          datetime:YYYY-MM-DDTHH:MM[:SS]
+              An absolute local datetime monitored from startup.
+          signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2
+              Release on the configured Unix signal.
+          file:PATH
+              Release when PATH exists as a regular file.
+        Conditions joined by " && " inside one argument must all be
+        satisfied. Use --or between alternative condition arguments.
 
 Options:
-  --release-on TYPE:SOURCE
-        Release when an external condition is met. May be repeated.
-        Conditions joined by " && " inside one --release-on must all be satisfied.
-        Multiple --release-on options are alternatives (OR).
-        Example:
-          dam --release-on 'signal:USR1 && file:/tmp/ready'
-
-        Supported conditions:
-          signal:USR1, signal:SIGUSR1
-              Release on SIGUSR1 (supported Unix platforms only).
-          signal:USR2, signal:SIGUSR2
-              Release on SIGUSR2 (supported Unix platforms only).
-          file:PATH
-              Release when PATH exists as a regular file (supported on all platforms).
+  --or CONDITION
+        Make CONDITION an alternative to the preceding condition. May be
+        written as --or=CONDITION.
 
   --buffer-size SIZE
         Set the maximum pre-release buffer size (default: 64K).
@@ -190,8 +187,8 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 		cleanup()
 		return 1, cleanup
 	}
-	if config.delay != nil && *config.delay == 0 {
-		if err := coordinator.satisfyDuration(*config.delay); err != nil {
+	if config.immediateDuration {
+		if err := coordinator.satisfyDuration(0); err != nil {
 			writeDiagnostic(diagnostics, err)
 			cleanup()
 			return 1, cleanup
@@ -216,18 +213,12 @@ type runConfig struct {
 	files    []string
 	groups   []releaseGroup
 
-	bufferSize int
+	bufferSize        int
+	immediateDuration bool
 }
 
 func (config runConfig) releaseGroups() []releaseGroup {
-	groups := slices.Clone(config.groups)
-	if config.delay != nil {
-		groups = append(groups, releaseGroup{members: []releaseCondition{newDurationReleaseCondition(*config.delay)}})
-	}
-	if config.deadline != nil {
-		groups = append(groups, releaseGroup{members: []releaseCondition{newDatetimeReleaseCondition(*config.deadline)}})
-	}
-	return groups
+	return slices.Clone(config.groups)
 }
 
 func parseConfig(args []string) (runConfig, error) {
@@ -237,25 +228,11 @@ func parseConfig(args []string) (runConfig, error) {
 func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 	location = normalizeLocation(location)
 	config := runConfig{bufferSize: preReleaseBufferSize}
+	hasCondition := false
+	pendingOR := false
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
-		case arg == "--release-on":
-			index++
-			if index == len(args) {
-				return runConfig{}, fmt.Errorf("missing value for --release-on")
-			}
-			group, err := parseReleaseGroup(args[index])
-			if err != nil {
-				return runConfig{}, err
-			}
-			config.addGroup(group)
-		case strings.HasPrefix(arg, "--release-on="):
-			group, err := parseReleaseGroup(strings.TrimPrefix(arg, "--release-on="))
-			if err != nil {
-				return runConfig{}, err
-			}
-			config.addGroup(group)
 		case arg == "--buffer-size":
 			index++
 			if index == len(args) {
@@ -272,29 +249,51 @@ func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 				return runConfig{}, err
 			}
 			config.bufferSize = bufferSize
-		case strings.HasPrefix(arg, "--"):
-			return runConfig{}, fmt.Errorf("unknown option %q", arg)
-		default:
-			if config.delay != nil || config.deadline != nil {
-				if _, err := time.ParseDuration(arg); err == nil && config.delay != nil {
-					// Preserve the established diagnostic for two relative durations.
-					return runConfig{}, fmt.Errorf("multiple durations are not allowed")
-				}
-				if isDeadlineToken(arg, location) {
-					return runConfig{}, fmt.Errorf("multiple deadlines are not allowed")
-				}
-				return runConfig{}, fmt.Errorf("unexpected argument %q", arg)
+		case arg == "--or":
+			if !hasCondition {
+				return runConfig{}, fmt.Errorf("--or requires a preceding condition")
 			}
-			delay, deadline, err := parseDeadlineArgument(arg, location)
+			if pendingOR {
+				return runConfig{}, fmt.Errorf("--or requires a condition")
+			}
+			pendingOR = true
+		case strings.HasPrefix(arg, "--or="):
+			if !hasCondition {
+				return runConfig{}, fmt.Errorf("--or requires a preceding condition")
+			}
+			if pendingOR {
+				return runConfig{}, fmt.Errorf("--or requires a condition")
+			}
+			value := strings.TrimPrefix(arg, "--or=")
+			if value == "" {
+				return runConfig{}, fmt.Errorf("--or requires a condition")
+			}
+			group, err := parseReleaseGroupAt(value, location)
 			if err != nil {
 				return runConfig{}, err
 			}
-			config.delay = delay
-			config.deadline = deadline
+			config.addGroup(group)
+			pendingOR = false
+		case strings.HasPrefix(arg, "--"):
+			return runConfig{}, fmt.Errorf("unknown option %q", arg)
+		default:
+			if hasCondition && !pendingOR {
+				return runConfig{}, fmt.Errorf("unexpected argument %q: use --or between conditions", arg)
+			}
+			group, err := parseReleaseGroupAt(arg, location)
+			if err != nil {
+				return runConfig{}, err
+			}
+			config.addGroup(group)
+			hasCondition = true
+			pendingOR = false
 		}
 	}
-	if config.delay == nil && config.deadline == nil && len(config.signals) == 0 && len(config.files) == 0 {
-		return runConfig{}, fmt.Errorf("usage: dam [DEADLINE] [--release-on TYPE:SOURCE]")
+	if !hasCondition {
+		return runConfig{}, fmt.Errorf("usage: dam CONDITION [--or CONDITION]...")
+	}
+	if pendingOR {
+		return runConfig{}, fmt.Errorf("--or requires a condition")
 	}
 	return config, nil
 }
@@ -685,15 +684,37 @@ func (config *runConfig) addGroup(group releaseGroup) {
 			config.signals = append(config.signals, condition.source)
 		case "file":
 			config.files = append(config.files, condition.source)
+		case "duration":
+			// Keep the first timed value in these fields for callers that use
+			// runConfig as a lightweight parse summary. Runtime coordination
+			// uses groups, which can contain any number of timed conditions.
+			if config.delay == nil {
+				if value, ok := durationReleaseValue(condition); ok {
+					config.delay = &value
+				}
+			}
+			if value, ok := durationReleaseValue(condition); ok && value == 0 {
+				config.immediateDuration = true
+			}
+		case "datetime":
+			if config.deadline == nil {
+				if value, ok := datetimeReleaseValue(condition); ok {
+					config.deadline = &value
+				}
+			}
 		}
 	}
 }
 
 func parseReleaseGroup(value string) (releaseGroup, error) {
+	return parseReleaseGroupAt(value, time.Local)
+}
+
+func parseReleaseGroupAt(value string, location *time.Location) (releaseGroup, error) {
 	parts := strings.Split(value, " && ")
 	group := releaseGroup{members: make([]releaseCondition, 0, len(parts))}
 	for _, part := range parts {
-		condition, err := parseCondition(part)
+		condition, err := parseConditionAt(part, location)
 		if err != nil {
 			return releaseGroup{}, err
 		}
@@ -703,11 +724,31 @@ func parseReleaseGroup(value string) (releaseGroup, error) {
 }
 
 func parseCondition(value string) (releaseCondition, error) {
+	return parseConditionAt(value, time.Local)
+}
+
+func parseConditionAt(value string, location *time.Location) (releaseCondition, error) {
+	location = normalizeLocation(location)
 	typeName, source, ok := strings.Cut(value, ":")
 	if !ok {
 		return releaseCondition{}, invalidReleaseCondition(value)
 	}
 	switch typeName {
+	case "duration":
+		duration, err := time.ParseDuration(source)
+		if err != nil {
+			return releaseCondition{}, invalidReleaseCondition(value)
+		}
+		if duration < 0 {
+			return releaseCondition{}, fmt.Errorf("invalid release condition %q: duration must not be negative", value)
+		}
+		return newDurationReleaseCondition(duration), nil
+	case "datetime":
+		deadline, err := parseAbsoluteDeadline(source, location)
+		if err != nil {
+			return releaseCondition{}, invalidReleaseCondition(value)
+		}
+		return newDatetimeReleaseCondition(deadline), nil
 	case "signal":
 		signal, err := parseSignalSource(value, source)
 		if err != nil {
@@ -736,7 +777,7 @@ func parseSignalSource(value, source string) (string, error) {
 }
 
 func invalidReleaseCondition(value string) error {
-	return fmt.Errorf("invalid release condition %q: want signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2, or file:PATH", value)
+	return fmt.Errorf("invalid release condition %q: want duration:DURATION, datetime:YYYY-MM-DDTHH:MM[:SS], signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2, or file:PATH", value)
 }
 
 func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}) error {

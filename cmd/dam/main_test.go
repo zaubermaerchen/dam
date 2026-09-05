@@ -23,34 +23,31 @@ const (
 )
 
 const expectedHelpText = `Usage:
-  dam DEADLINE [--buffer-size SIZE]
-  dam [DEADLINE] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
+  dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
   dam --help
   dam --version
 
 Hold pipeline output until a release condition is met.
 
 Arguments:
-  DEADLINE
-        A relative Go duration (such as 500ms, 3s, or 2m) starts after the
-        first non-empty stdin read. An absolute local datetime in
-        YYYY-MM-DDTHH:MM[:SS] form is monitored from startup in local time.
+  CONDITION
+        A condition is one of:
+          duration:DURATION
+              A Go duration (such as 500ms, 3s, or 2m) starts after the
+              first non-empty stdin read.
+          datetime:YYYY-MM-DDTHH:MM[:SS]
+              An absolute local datetime monitored from startup.
+          signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2
+              Release on the configured Unix signal.
+          file:PATH
+              Release when PATH exists as a regular file.
+        Conditions joined by " && " inside one argument must all be
+        satisfied. Use --or between alternative condition arguments.
 
 Options:
-  --release-on TYPE:SOURCE
-        Release when an external condition is met. May be repeated.
-        Conditions joined by " && " inside one --release-on must all be satisfied.
-        Multiple --release-on options are alternatives (OR).
-        Example:
-          dam --release-on 'signal:USR1 && file:/tmp/ready'
-
-        Supported conditions:
-          signal:USR1, signal:SIGUSR1
-              Release on SIGUSR1 (supported Unix platforms only).
-          signal:USR2, signal:SIGUSR2
-              Release on SIGUSR2 (supported Unix platforms only).
-          file:PATH
-              Release when PATH exists as a regular file (supported on all platforms).
+  --or CONDITION
+        Make CONDITION an alternative to the preceding condition. May be
+        written as --or=CONDITION.
 
   --buffer-size SIZE
         Set the maximum pre-release buffer size (default: 64K).
@@ -71,7 +68,7 @@ func TestRunPreservesBinaryInputWithZeroDelay(t *testing.T) {
 
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
-	if status := run([]string{"0s"}, bytes.NewReader(input), &output, &diagnostics); status != 0 {
+	if status := run([]string{"duration:0s"}, bytes.NewReader(input), &output, &diagnostics); status != 0 {
 		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
 	}
 	if !bytes.Equal(output.Bytes(), input) {
@@ -239,7 +236,7 @@ func TestRunPreservesDelayedBinaryInput(t *testing.T) {
 	startedAt := time.Now()
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, input, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	var wroteAt time.Time
@@ -276,7 +273,7 @@ func TestRunStartsDelayOnFirstByteRead(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, input, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	select {
@@ -320,7 +317,7 @@ func TestRunDoesNotReleaseOnEOFBeforeDelay(t *testing.T) {
 	startedAt := time.Now()
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, eofReader{data: []byte("before eof")}, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, eofReader{data: []byte("before eof")}, output, &diagnostics)
 	}()
 
 	var wroteAt time.Time
@@ -350,7 +347,7 @@ func TestRunDoesNotStartDelayForEmptyInput(t *testing.T) {
 	status := make(chan int, 1)
 	var output, diagnostics bytes.Buffer
 	go func() {
-		status <- run([]string{"1h"}, strings.NewReader(""), &output, &diagnostics)
+		status <- run([]string{"duration:1h"}, strings.NewReader(""), &output, &diagnostics)
 	}()
 
 	select {
@@ -379,7 +376,7 @@ func TestRunAppliesBackpressureBeforeRelease(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, input, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	var firstReadAt time.Time
@@ -437,7 +434,7 @@ func TestRunBoundsPreReleaseReadAhead(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, input, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	bytesRead := 0
@@ -491,7 +488,7 @@ func TestRunFillsBoundedPreReleaseBufferWithFragmentedReads(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, input, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	for wantRead := 1; wantRead <= readCount; wantRead++ {
@@ -542,7 +539,7 @@ func TestRunPassesThroughAfterReleaseWithoutSecondGate(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{delay.String()}, input, output, &diagnostics)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	select {
@@ -577,9 +574,10 @@ func TestRunPassesThroughAfterReleaseWithoutSecondGate(t *testing.T) {
 
 func TestParseConfigAcceptsDurationAndRepeatableSignalsInAnyOrder(t *testing.T) {
 	config, err := parseConfig([]string{
-		"--release-on=signal:USR1",
-		"250ms",
-		"--release-on",
+		"signal:USR1",
+		"--or",
+		"duration:250ms",
+		"--or",
 		"signal:SIGUSR1",
 	})
 	if err != nil {
@@ -594,7 +592,7 @@ func TestParseConfigAcceptsDurationAndRepeatableSignalsInAnyOrder(t *testing.T) 
 }
 
 func TestParseConfigAcceptsSignalWithoutDuration(t *testing.T) {
-	config, err := parseConfig([]string{"--release-on", "signal:SIGUSR1"})
+	config, err := parseConfig([]string{"signal:SIGUSR1"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
@@ -608,7 +606,7 @@ func TestParseConfigAcceptsSignalWithoutDuration(t *testing.T) {
 
 func TestParseConfigAcceptsAbsoluteLocalDeadline(t *testing.T) {
 	location := time.FixedZone("test", 9*60*60)
-	config, err := parseConfigAt([]string{"2026-12-31T23:59"}, location)
+	config, err := parseConfigAt([]string{"datetime:2026-12-31T23:59"}, location)
 	if err != nil {
 		t.Fatalf("parseConfigAt returned error: %v", err)
 	}
@@ -625,7 +623,7 @@ func TestParseConfigAcceptsAbsoluteLocalDeadline(t *testing.T) {
 }
 
 func TestParseConfigAcceptsAbsoluteDeadlineWithSeconds(t *testing.T) {
-	config, err := parseConfigAt([]string{"2026-12-31T23:59:07"}, time.UTC)
+	config, err := parseConfigAt([]string{"datetime:2026-12-31T23:59:07"}, time.UTC)
 	if err != nil {
 		t.Fatalf("parseConfigAt returned error: %v", err)
 	}
@@ -640,7 +638,7 @@ func TestParseConfigAcceptsAbsoluteDeadlineWithSeconds(t *testing.T) {
 func TestParseConfigAcceptsAbsoluteDeadlineYearBoundaries(t *testing.T) {
 	for _, value := range []string{"0001-01-01T00:00", "9999-12-31T23:59:59"} {
 		t.Run(value, func(t *testing.T) {
-			config, err := parseConfigAt([]string{value}, time.UTC)
+			config, err := parseConfigAt([]string{"datetime:" + value}, time.UTC)
 			if err != nil {
 				t.Fatalf("parseConfigAt returned error: %v", err)
 			}
@@ -665,31 +663,25 @@ func TestParseConfigRejectsMalformedAbsoluteDeadlines(t *testing.T) {
 		"2026-12-31T23:59+09:00",
 	} {
 		t.Run(value, func(t *testing.T) {
-			if _, err := parseConfigAt([]string{value}, time.UTC); err == nil {
+			if _, err := parseConfigAt([]string{"datetime:" + value}, time.UTC); err == nil {
 				t.Fatal("parseConfigAt unexpectedly succeeded")
 			}
 		})
 	}
 }
 
-func TestParseConfigRejectsMultipleKindsOfDeadlines(t *testing.T) {
-	for _, test := range []struct {
-		args []string
-		want string
-	}{
-		{args: []string{"1s", "2026-12-31T23:59"}, want: "multiple deadlines are not allowed"},
-		{args: []string{"2026-12-31T23:59", "1s"}, want: "multiple deadlines are not allowed"},
-		{args: []string{"2026-12-31T23:59", "2027-01-01T00:00"}, want: "multiple deadlines are not allowed"},
-	} {
-		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
-			_, err := parseConfigAt(test.args, time.UTC)
-			if err == nil {
-				t.Fatal("parseConfigAt unexpectedly succeeded")
-			}
-			if !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %q, want substring %q", err, test.want)
-			}
-		})
+func TestParseConfigAcceptsMultipleKindsOfTimedConditions(t *testing.T) {
+	config, err := parseConfigAt([]string{
+		"duration:1s",
+		"--or",
+		"datetime:2026-12-31T23:59",
+		"--or=datetime:2027-01-01T00:00",
+	}, time.UTC)
+	if err != nil {
+		t.Fatalf("parseConfigAt returned error: %v", err)
+	}
+	if len(config.groups) != 3 {
+		t.Fatalf("groups = %#v, want three alternatives", config.groups)
 	}
 }
 
@@ -845,7 +837,7 @@ func TestRunAbsoluteDeadlineReleasesBeforeFirstInput(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- runWithClock([]string{"2026-01-02T03:04:05"}, input, output, &diagnostics, clock)
+		status <- runWithClock([]string{"datetime:2026-01-02T03:04:05"}, input, output, &diagnostics, clock)
 	}()
 
 	select {
@@ -885,7 +877,7 @@ func TestRunPastAbsoluteDeadlineReleasesImmediately(t *testing.T) {
 		},
 	}
 	var output, diagnostics bytes.Buffer
-	status := runWithClock([]string{"2026-01-02T03:03:00"}, strings.NewReader("past"), &output, &diagnostics, clock)
+	status := runWithClock([]string{"datetime:2026-01-02T03:03:00"}, strings.NewReader("past"), &output, &diagnostics, clock)
 	if status != 0 {
 		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
 	}
@@ -906,8 +898,9 @@ func TestRunPastAbsoluteDeadlineDoesNotOverrideInitialFileFatal(t *testing.T) {
 	input := &trackingReader{}
 	var output, diagnostics bytes.Buffer
 	status := runWithClock([]string{
-		"2026-01-02T03:03:00",
-		"--release-on=file:" + t.TempDir(),
+		"datetime:2026-01-02T03:03:00",
+		"--or",
+		"file:" + t.TempDir(),
 	}, input, &output, &diagnostics, clock)
 	if status == 0 {
 		t.Fatal("directory release condition unexpectedly succeeded")
@@ -936,8 +929,9 @@ func TestRunArmsAbsoluteDeadlineBeforeInitialFileProbe(t *testing.T) {
 	}
 	var output, diagnostics bytes.Buffer
 	status := runWithClock([]string{
-		now.Add(time.Minute).Format("2006-01-02T15:04:05"),
-		"--release-on=file:" + t.TempDir(),
+		"datetime:" + now.Add(time.Minute).Format("2006-01-02T15:04:05"),
+		"--or",
+		"file:" + t.TempDir(),
 	}, &trackingReader{}, &output, &diagnostics, clock)
 	if status == 0 {
 		t.Fatal("directory release condition unexpectedly succeeded")
@@ -963,8 +957,9 @@ func TestRunZeroDurationStopsFileMonitorBeforeReadiness(t *testing.T) {
 	ready := make(chan struct{})
 	go func() {
 		got, cleanup := executeWithReady([]string{
-			"0s",
-			"--release-on=file:" + path,
+			"duration:0s",
+			"--or",
+			"file:" + path,
 		}, input, output, &diagnostics, func() {
 			if err := os.Mkdir(path, 0o700); err != nil {
 				diagnostics.WriteString(err.Error())
@@ -1012,7 +1007,7 @@ func TestRunEmptyInputDoesNotWaitForAbsoluteDeadline(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- runWithClock([]string{"2026-01-03T03:04"}, strings.NewReader(""), &output, &diagnostics, clock)
+		status <- runWithClock([]string{"datetime:2026-01-03T03:04"}, strings.NewReader(""), &output, &diagnostics, clock)
 	}()
 	select {
 	case got := <-status:
@@ -1097,9 +1092,10 @@ func TestStartDeadlineMonitorSkipsAlreadyOpenCoordinator(t *testing.T) {
 
 func TestParseConfigAcceptsUSR2AliasesAndPreservesOrder(t *testing.T) {
 	config, err := parseConfig([]string{
-		"--release-on=signal:USR2",
-		"250ms",
-		"--release-on",
+		"signal:USR2",
+		"--or",
+		"duration:250ms",
+		"--or",
 		"signal:SIGUSR2",
 	})
 	if err != nil {
@@ -1114,7 +1110,7 @@ func TestParseConfigAcceptsUSR2AliasesAndPreservesOrder(t *testing.T) {
 }
 
 func TestParseConfigDefaultsBufferSize(t *testing.T) {
-	config, err := parseConfig([]string{"1s"})
+	config, err := parseConfig([]string{"duration:1s"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
@@ -1129,14 +1125,14 @@ func TestParseConfigAcceptsBufferSizeFormsAndBinaryUnits(t *testing.T) {
 		args []string
 		want int
 	}{
-		{name: "bytes separated", args: []string{"1s", "--buffer-size", "123"}, want: 123},
-		{name: "bytes equals", args: []string{"--buffer-size=123", "1s"}, want: 123},
-		{name: "upper kilobytes", args: []string{"1s", "--buffer-size", "2K"}, want: 2 * 1024},
-		{name: "lower kilobytes", args: []string{"1s", "--buffer-size=1k"}, want: 1024},
-		{name: "upper megabytes", args: []string{"1s", "--buffer-size=3M"}, want: 3 * 1024 * 1024},
-		{name: "lower megabytes", args: []string{"--buffer-size", "4m", "1s"}, want: 4 * 1024 * 1024},
-		{name: "upper gigabytes", args: []string{"1s", "--buffer-size=1G"}, want: 1024 * 1024 * 1024},
-		{name: "lower gigabytes", args: []string{"--buffer-size", "1g", "1s"}, want: 1024 * 1024 * 1024},
+		{name: "bytes separated", args: []string{"duration:1s", "--buffer-size", "123"}, want: 123},
+		{name: "bytes equals", args: []string{"--buffer-size=123", "duration:1s"}, want: 123},
+		{name: "upper kilobytes", args: []string{"duration:1s", "--buffer-size", "2K"}, want: 2 * 1024},
+		{name: "lower kilobytes", args: []string{"duration:1s", "--buffer-size=1k"}, want: 1024},
+		{name: "upper megabytes", args: []string{"duration:1s", "--buffer-size=3M"}, want: 3 * 1024 * 1024},
+		{name: "lower megabytes", args: []string{"--buffer-size", "4m", "duration:1s"}, want: 4 * 1024 * 1024},
+		{name: "upper gigabytes", args: []string{"duration:1s", "--buffer-size=1G"}, want: 1024 * 1024 * 1024},
+		{name: "lower gigabytes", args: []string{"--buffer-size", "1g", "duration:1s"}, want: 1024 * 1024 * 1024},
 	}
 
 	for _, test := range tests {
@@ -1167,7 +1163,7 @@ func TestParseConfigRejectsInvalidBufferSizes(t *testing.T) {
 		"18446744073709551615G",
 	} {
 		t.Run(value, func(t *testing.T) {
-			args := []string{"1s", "--buffer-size", value}
+			args := []string{"duration:1s", "--buffer-size", value}
 			if _, err := parseConfig(args); err == nil {
 				t.Fatal("parseConfig unexpectedly succeeded")
 			}
@@ -1175,8 +1171,8 @@ func TestParseConfigRejectsInvalidBufferSizes(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"1s", "--buffer-size"},
-		{"1s", "--buffer-size="},
+		{"duration:1s", "--buffer-size"},
+		{"duration:1s", "--buffer-size="},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			if _, err := parseConfig(args); err == nil {
@@ -1198,7 +1194,7 @@ func TestRunUsesSmallInitialReadRegionForConfiguredBuffer(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"1ms", "--buffer-size", "64K"}, input, &output, &diagnostics)
+		status <- run([]string{"duration:1ms", "--buffer-size", "64K"}, input, &output, &diagnostics)
 	}()
 
 	var firstReadSize int
@@ -1382,7 +1378,7 @@ func TestParseConfigRejectsInvalidUSR2Conditions(t *testing.T) {
 		"signal:SIGUSR2:extra",
 	} {
 		t.Run(value, func(t *testing.T) {
-			if _, err := parseConfig([]string{"--release-on", value}); err == nil {
+			if _, err := parseConfig([]string{value}); err == nil {
 				t.Fatal("parseConfig unexpectedly succeeded")
 			}
 		})
@@ -1397,12 +1393,12 @@ func TestParseConfigDistinguishesAdditionalPositionalArguments(t *testing.T) {
 	}{
 		{
 			name: "second duration",
-			args: []string{"1s", "2s"},
-			want: "multiple durations are not allowed",
+			args: []string{"duration:1s", "duration:2s"},
+			want: `unexpected argument "duration:2s"`,
 		},
 		{
 			name: "unexpected argument",
-			args: []string{"1s", "foo"},
+			args: []string{"duration:1s", "foo"},
 			want: `unexpected argument "foo"`,
 		},
 	}
@@ -1413,8 +1409,8 @@ func TestParseConfigDistinguishesAdditionalPositionalArguments(t *testing.T) {
 			if err == nil {
 				t.Fatal("parseConfig unexpectedly succeeded")
 			}
-			if got := err.Error(); got != test.want {
-				t.Fatalf("parseConfig error = %q, want %q", got, test.want)
+			if got := err.Error(); !strings.Contains(got, test.want) {
+				t.Fatalf("parseConfig error = %q, want substring %q", got, test.want)
 			}
 		})
 	}
@@ -1426,15 +1422,15 @@ func TestParseConfigRejectsInvalidReleaseConditions(t *testing.T) {
 		args []string
 	}{
 		{name: "missing all", args: nil},
-		{name: "duplicate duration", args: []string{"1s", "2s"}},
+		{name: "duplicate duration", args: []string{"duration:1s", "duration:2s"}},
 		{name: "missing release value", args: []string{"--release-on"}},
 		{name: "empty release value", args: []string{"--release-on="}},
-		{name: "missing source", args: []string{"--release-on", "signal:"}},
-		{name: "unknown type", args: []string{"--release-on", "term:TERM"}},
-		{name: "unknown signal", args: []string{"--release-on", "signal:TERM"}},
-		{name: "lowercase type", args: []string{"--release-on", "Signal:USR1"}},
-		{name: "lowercase source", args: []string{"--release-on", "signal:usr1"}},
-		{name: "extra separator", args: []string{"--release-on", "signal:USR1:extra"}},
+		{name: "missing source", args: []string{"signal:"}},
+		{name: "unknown type", args: []string{"term:TERM"}},
+		{name: "unknown signal", args: []string{"signal:TERM"}},
+		{name: "lowercase type", args: []string{"Signal:USR1"}},
+		{name: "lowercase source", args: []string{"signal:usr1"}},
+		{name: "extra separator", args: []string{"signal:USR1:extra"}},
 		{name: "version with release", args: []string{"--version", "--release-on", "signal:USR1"}},
 	}
 
@@ -1636,7 +1632,7 @@ func TestRunRejectsInvalidArguments(t *testing.T) {
 func TestRunReportsInputAndOutputErrors(t *testing.T) {
 	inputErr := errors.New("input failed")
 	var output, diagnostics bytes.Buffer
-	if status := run([]string{"0s"}, errorReader{err: inputErr}, &output, &diagnostics); status == 0 {
+	if status := run([]string{"duration:0s"}, errorReader{err: inputErr}, &output, &diagnostics); status == 0 {
 		t.Fatal("input error unexpectedly succeeded")
 	}
 	if output.Len() != 0 {
@@ -1649,7 +1645,7 @@ func TestRunReportsInputAndOutputErrors(t *testing.T) {
 	outputErr := errors.New("output failed")
 	output.Reset()
 	diagnostics.Reset()
-	if status := run([]string{"0s"}, strings.NewReader("input"), errorWriter{err: outputErr}, &diagnostics); status == 0 {
+	if status := run([]string{"duration:0s"}, strings.NewReader("input"), errorWriter{err: outputErr}, &diagnostics); status == 0 {
 		t.Fatal("output error unexpectedly succeeded")
 	}
 	if !strings.Contains(diagnostics.String(), outputErr.Error()) {

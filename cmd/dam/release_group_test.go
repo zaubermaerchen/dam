@@ -394,3 +394,108 @@ func TestRunCompoundFileGroupKeepsDeadlineCompatibility(t *testing.T) {
 		t.Fatalf("compound deadline output = %q, want %q", got, want)
 	}
 }
+
+func TestMixedConditionKindsLatchAcrossANDGroup(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		missing string
+	}{
+		{name: "duration withheld", missing: "duration"},
+		{name: "datetime withheld", missing: "datetime"},
+		{name: "signal withheld", missing: "signal"},
+		{name: "file withheld", missing: "file"},
+		{name: "all members", missing: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			first := filepath.Join(dir, "first")
+			deadline := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+			config, err := parseConfigAt([]string{
+				"duration:10s && datetime:2026-01-02T03:04:05 && signal:USR1 && file:" + first,
+			}, time.UTC)
+			if err != nil {
+				t.Fatalf("parseConfigAt returned error: %v", err)
+			}
+			coordinator := newReleaseCoordinatorWithGroups(false, config.releaseGroups())
+			t.Cleanup(coordinator.stopFiles)
+
+			// Every row withholds exactly one member. The all-members row
+			// confirms that the same event sequence does open the gate.
+			events := []struct {
+				kind    string
+				satisfy func() error
+			}{
+				{kind: "file", satisfy: func() error { return coordinator.reportFileReady(first) }},
+				{kind: "signal", satisfy: func() error { return coordinator.satisfySignal("SIGUSR1") }},
+				{kind: "datetime", satisfy: func() error { return coordinator.satisfyDatetime(deadline) }},
+				{kind: "duration", satisfy: func() error { return coordinator.satisfyDuration(10 * time.Second) }},
+			}
+			for _, event := range events {
+				if event.kind == test.missing {
+					continue
+				}
+				if err := event.satisfy(); err != nil {
+					t.Fatalf("satisfy %s returned error: %v", event.kind, err)
+				}
+			}
+
+			if test.missing == "" {
+				select {
+				case <-coordinator.release:
+				default:
+					t.Fatal("mixed AND group did not open after every member was satisfied")
+				}
+				return
+			}
+			select {
+			case <-coordinator.release:
+				t.Fatalf("mixed AND group opened with %s withheld", test.missing)
+			default:
+			}
+		})
+	}
+}
+
+func TestInitialFatalWinsPendingTimedSignalAndReadyFile(t *testing.T) {
+	fatal := errors.New("initial release probe failed")
+	deadline := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	coordinator := newReleaseCoordinatorWithGroups(true, []releaseGroup{
+		{members: []releaseCondition{
+			newDurationReleaseCondition(time.Second),
+			newDatetimeReleaseCondition(deadline),
+			{kind: "signal", source: "SIGUSR1"},
+			{kind: "file", source: "ready"},
+		}},
+		{members: []releaseCondition{{kind: "file", source: "bad"}}},
+	})
+	monitor, err := newFileMonitorWithProbe([]string{"ready", "bad"}, coordinator, func(path string) (bool, error) {
+		if path == "ready" {
+			if err := coordinator.satisfyDuration(time.Second); err != nil {
+				return false, err
+			}
+			if err := coordinator.satisfyDatetime(deadline); err != nil {
+				return false, err
+			}
+			if err := coordinator.satisfySignal("SIGUSR1"); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		return false, fatal
+	}, time.Millisecond)
+	if monitor == nil {
+		t.Fatal("newFileMonitorWithProbe returned nil monitor")
+	}
+	t.Cleanup(monitor.Close)
+	if !errors.Is(err, fatal) {
+		t.Fatalf("initial error = %v, want %v", err, fatal)
+	}
+	if got := coordinator.fatalError(); !errors.Is(got, fatal) {
+		t.Fatalf("coordinator fatal = %v, want %v", got, fatal)
+	}
+	select {
+	case <-coordinator.release:
+		t.Fatal("pending timed/signal/file events opened gate despite initial fatal")
+	default:
+	}
+}

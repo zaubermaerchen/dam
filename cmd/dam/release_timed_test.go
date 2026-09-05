@@ -4,6 +4,10 @@ package main
 // and monitor lifecycle with signal and file conditions.
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -281,4 +285,128 @@ func TestTimedReleaseMonitorStopsTimersAfterOpenAndEmptyInput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunMixedTimedAndFileGroupsStopsAlternativeMonitorsAfterOpen(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+
+	var (
+		mu         sync.Mutex
+		timers     = make(map[time.Duration]chan time.Time)
+		stopped    = make(map[time.Duration]int)
+		stopEvents = make(chan time.Duration, 4)
+		allTimer   = make(chan struct{})
+	)
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: time.UTC,
+		newTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			mu.Lock()
+			channel := make(chan time.Time, 1)
+			timers[delay] = channel
+			if len(timers) == 3 {
+				close(allTimer)
+			}
+			mu.Unlock()
+			return channel, func() {
+				mu.Lock()
+				stopped[delay]++
+				mu.Unlock()
+				stopEvents <- delay
+			}
+		},
+	}
+
+	input := &blockingAfterFirstReader{data: []byte("mixed timed/file payload"), release: make(chan struct{})}
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	var diagnostics bytes.Buffer
+	status := make(chan int, 1)
+	go func() {
+		status <- runWithClock([]string{
+			"duration:5s && datetime:2026-01-02T03:03:00 && file:" + first,
+			"--or",
+			"duration:10s && datetime:2026-01-02T03:05:00 && file:" + second,
+		}, input, output, &diagnostics, clock)
+	}()
+
+	select {
+	case <-allTimer:
+	case <-time.After(testTimeout):
+		t.Fatal("run did not start the distinct datetime and duration timers")
+	}
+	if err := os.WriteFile(first, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("create first release file: %v", err)
+	}
+	mu.Lock()
+	durationTimer := timers[5*time.Second]
+	mu.Unlock()
+	if durationTimer == nil {
+		t.Fatal("run did not create the first duration timer")
+	}
+	durationTimer <- now
+
+	select {
+	case <-output.writeTimes:
+	case <-time.After(testTimeout):
+		t.Fatal("mixed timed/file group did not write held data after release")
+	}
+	wantStopped := map[time.Duration]bool{10 * time.Second: false, time.Minute: false}
+	for len(wantStopped) > 0 {
+		select {
+		case got := <-stopEvents:
+			if _, ok := wantStopped[got]; !ok {
+				t.Fatalf("unexpected stopped timer delay %v", got)
+			}
+			delete(wantStopped, got)
+		case <-time.After(testTimeout):
+			t.Fatalf("timers %v were not stopped before the blocked read was released", wantStopped)
+		}
+	}
+	select {
+	case got := <-status:
+		t.Fatalf("run returned before post-release read was released with status %d", got)
+	default:
+	}
+	close(input.release)
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Fatalf("run status = %d, diagnostics = %q", got, diagnostics.String())
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("mixed timed/file group did not complete after post-release read")
+	}
+	if got, want := output.String(), string(input.data); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if stopped[10*time.Second] == 0 {
+		t.Fatal("unselected duration timer was not stopped after OPEN")
+	}
+	if stopped[time.Minute] == 0 {
+		t.Fatal("unselected datetime timer was not stopped after OPEN")
+	}
+}
+
+type blockingAfterFirstReader struct {
+	data    []byte
+	release chan struct{}
+	mu      sync.Mutex
+	reads   int
+}
+
+func (reader *blockingAfterFirstReader) Read(buffer []byte) (int, error) {
+	reader.mu.Lock()
+	reader.reads++
+	read := reader.reads
+	reader.mu.Unlock()
+	if read == 1 {
+		return copy(buffer, reader.data), nil
+	}
+	<-reader.release
+	return 0, io.EOF
 }

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-func TestIssue30NonUnixRejectsEverySignalBearingExpression(t *testing.T) {
+func TestRunRejectsEverySignalBearingExpressionOnUnsupportedPlatforms(t *testing.T) {
 	for _, args := range [][]string{
 		{"signal:USR1"},
 		{"signal:SIGUSR1"},
@@ -42,7 +42,7 @@ func TestIssue30NonUnixRejectsEverySignalBearingExpression(t *testing.T) {
 	}
 }
 
-func TestIssue30NonUnixAcceptsTimedAndFileOnlyExpressions(t *testing.T) {
+func TestRunAcceptsTimedAndFileOnlyExpressionsOnUnsupportedPlatforms(t *testing.T) {
 	dir := t.TempDir()
 	ready := filepath.Join(dir, "ready")
 	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {

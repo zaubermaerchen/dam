@@ -1035,6 +1035,118 @@ func TestForwardDelayedReportsClosedFailureChannel(t *testing.T) {
 	}
 }
 
+func TestInFlightFileFatalIsIgnoredAfterTimedOpen(t *testing.T) {
+	coordinator := newReleaseCoordinatorWithGroups(false, []releaseGroup{
+		{members: []releaseCondition{newDurationReleaseCondition(time.Second)}},
+	})
+	t.Cleanup(coordinator.stopFiles)
+	probeStarted := make(chan struct{})
+	allowProbe := make(chan struct{})
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		interval:    time.Millisecond,
+		wait: func(string, <-chan struct{}, time.Duration) bool {
+			return true
+		},
+		probe: func(string) (bool, error) {
+			close(probeStarted)
+			<-allowProbe
+			return false, errors.New("late file probe failure")
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		monitor.watchPath("late")
+		close(done)
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(testTimeout):
+		t.Fatal("in-flight file probe did not start")
+	}
+	if err := coordinator.satisfyDuration(time.Second); err != nil {
+		t.Fatalf("satisfyDuration returned error: %v", err)
+	}
+	select {
+	case <-coordinator.release:
+	case <-time.After(testTimeout):
+		t.Fatal("timed condition did not open coordinator")
+	}
+	close(allowProbe)
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("file watcher did not finish after in-flight probe")
+	}
+	if got := coordinator.fatalError(); got != nil {
+		t.Fatalf("late file fatal = %v, want nil after OPEN", got)
+	}
+}
+
+func TestTimedAndFileFatalOpenBoundaryHasConsistentOutcome(t *testing.T) {
+	for attempt := 0; attempt < 100; attempt++ {
+		coordinator := newReleaseCoordinatorWithGroups(false, []releaseGroup{
+			{members: []releaseCondition{newDurationReleaseCondition(time.Second)}},
+			{members: []releaseCondition{{kind: "file", source: "late"}}},
+		})
+		probeStarted := make(chan struct{})
+		allowProbe := make(chan struct{})
+		monitor := &fileMonitor{
+			coordinator: coordinator,
+			interval:    time.Millisecond,
+			wait: func(string, <-chan struct{}, time.Duration) bool {
+				return true
+			},
+			probe: func(string) (bool, error) {
+				close(probeStarted)
+				<-allowProbe
+				return false, errors.New("barrier file probe failure")
+			},
+		}
+		watchDone := make(chan struct{})
+		go func() {
+			monitor.watchPath("late")
+			close(watchDone)
+		}()
+		select {
+		case <-probeStarted:
+		case <-time.After(testTimeout):
+			coordinator.stopFiles()
+			t.Fatalf("attempt %d: file probe did not reach the barrier", attempt)
+		}
+
+		start := make(chan struct{})
+		timedDone := make(chan error, 1)
+		go func() {
+			<-start
+			timedDone <- coordinator.satisfyDuration(time.Second)
+		}()
+		go func() {
+			<-start
+			close(allowProbe)
+		}()
+		close(start)
+
+		if err := <-timedDone; err != nil && !errors.Is(err, coordinator.fatalError()) {
+			t.Fatalf("attempt %d: timed event error = %v, fatal = %v", attempt, err, coordinator.fatalError())
+		}
+		select {
+		case <-watchDone:
+		case <-time.After(testTimeout):
+			coordinator.stopFiles()
+			t.Fatalf("attempt %d: file watcher did not finish", attempt)
+		}
+
+		opened := releaseChannelReady(coordinator.release)
+		fatal := coordinator.fatalError()
+		if opened == (fatal != nil) {
+			coordinator.stopFiles()
+			t.Fatalf("attempt %d: inconsistent OPEN/fatal state: opened=%t fatal=%v", attempt, opened, fatal)
+		}
+		coordinator.stopFiles()
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false

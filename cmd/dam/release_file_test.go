@@ -1042,6 +1042,11 @@ func TestInFlightFileFatalIsIgnoredAfterTimedOpen(t *testing.T) {
 	t.Cleanup(coordinator.stopFiles)
 	probeStarted := make(chan struct{})
 	allowProbe := make(chan struct{})
+	var unblockProbeOnce sync.Once
+	unblockProbe := func() {
+		unblockProbeOnce.Do(func() { close(allowProbe) })
+	}
+	t.Cleanup(unblockProbe)
 	monitor := &fileMonitor{
 		coordinator: coordinator,
 		interval:    time.Millisecond,
@@ -1072,7 +1077,7 @@ func TestInFlightFileFatalIsIgnoredAfterTimedOpen(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("timed condition did not open coordinator")
 	}
-	close(allowProbe)
+	unblockProbe()
 	select {
 	case <-done:
 	case <-time.After(testTimeout):
@@ -1091,6 +1096,11 @@ func TestTimedAndFileFatalOpenBoundaryHasConsistentOutcome(t *testing.T) {
 		})
 		probeStarted := make(chan struct{})
 		allowProbe := make(chan struct{})
+		var unblockProbeOnce sync.Once
+		unblockProbe := func() {
+			unblockProbeOnce.Do(func() { close(allowProbe) })
+		}
+		t.Cleanup(unblockProbe)
 		monitor := &fileMonitor{
 			coordinator: coordinator,
 			interval:    time.Millisecond,
@@ -1123,7 +1133,7 @@ func TestTimedAndFileFatalOpenBoundaryHasConsistentOutcome(t *testing.T) {
 		}()
 		go func() {
 			<-start
-			close(allowProbe)
+			unblockProbe()
 		}()
 		close(start)
 

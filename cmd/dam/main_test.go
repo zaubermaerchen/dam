@@ -33,16 +33,20 @@ Arguments:
   CONDITION
         A condition is one of:
           duration:DURATION
-              A Go duration (such as 500ms, 3s, or 2m) starts after the
-              first non-empty stdin read.
+              A positive Go duration (such as 500ms, 3s, or 2m) starts after
+              the first non-empty stdin read. A 0s duration is immediate.
+              Multiple positive duration conditions share that starting read.
           datetime:YYYY-MM-DDTHH:MM[:SS]
-              An absolute local datetime monitored from startup.
+              An absolute local datetime monitored from startup. Multiple
+              datetime conditions are allowed.
           signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2
-              Release on the configured Unix signal.
+              Release on the configured Unix signal. Alias spellings are
+              equivalent on supported Unix targets.
           file:PATH
-              Release when PATH exists as a regular file.
-        Conditions joined by " && " inside one argument must all be
-        satisfied. Use --or between alternative condition arguments.
+              Release when PATH resolves to a regular file on any target.
+        Conditions joined by " && " inside one argument form an AND group.
+        Quote AND groups so the shell passes " && " literally. Every member
+        is latched once satisfied. Use --or between alternative conditions.
 
 Options:
   --or CONDITION
@@ -52,6 +56,12 @@ Options:
   --buffer-size SIZE
         Set the maximum pre-release buffer size (default: 64K).
         SIZE is a positive byte count or a binary K/k, M/m, or G/g value.
+        Also accepted as --buffer-size=SIZE.
+
+Notes:
+        Equivalent duration values and resolved datetime values share one
+        latched event. Time and file monitors stop after release or empty
+        stdin reaches EOF.
 
   -h, --help
         Show this help and exit.
@@ -59,6 +69,84 @@ Options:
   --version
         Show version and exit.
 `
+
+func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
+	readme := readRepositoryDocumentation(t, "README.md")
+	agents := readRepositoryDocumentation(t, "AGENTS.md")
+
+	migrationHeading := "## Migrating from v0.3.x"
+	migrationStart := strings.Index(readme, migrationHeading)
+	if migrationStart < 0 {
+		t.Fatalf("README.md is missing %q", migrationHeading)
+	}
+
+	for _, want := range []string{
+		"v0.4.0 is a breaking release",
+		"dam 30s\n  -> dam duration:30s",
+		"dam 2026-09-03T18:00\n  -> dam datetime:2026-09-03T18:00",
+		"dam --release-on signal:USR1\n  -> dam signal:USR1",
+		"dam --release-on=signal:USR1\n  -> dam signal:USR1",
+		"dam --release-on signal:USR1 --release-on file:/tmp/ready\n  -> dam signal:USR1 --or file:/tmp/ready",
+		"--or CONDITION",
+		"--or=CONDITION",
+		" && ",
+		"latched",
+		"multiple distinct durations",
+		"Multiple distinct\ndatetime conditions",
+		"Equivalent duration values",
+		"equivalent datetime values",
+		"monitoring stop",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README.md is missing documentation %q", want)
+		}
+	}
+
+	// Historical spellings belong only in the migration section; keeping them
+	// out of every other section prevents the README from advertising removed
+	// syntax as supported.
+	migrationEnd := len(readme)
+	sectionRemainder := readme[migrationStart+len(migrationHeading):]
+	if nextHeading := strings.Index(sectionRemainder, "\n## "); nextHeading >= 0 {
+		migrationEnd = migrationStart + len(migrationHeading) + nextHeading + 1
+	}
+	activeREADME := readme[:migrationStart] + readme[migrationEnd:]
+	for _, obsolete := range []string{"--release-on", "dam 30s", "dam 2026-09-03T18:00"} {
+		if strings.Contains(activeREADME, obsolete) {
+			t.Errorf("README.md advertises obsolete syntax outside migration notes: %q", obsolete)
+		}
+	}
+
+	for _, want := range []string{
+		"dam CONDITION [--or CONDITION]... [--buffer-size SIZE]",
+		"duration:DURATION",
+		"datetime:",
+		"signal:",
+		"file:",
+		"&&",
+		"latch",
+		"最初の非空 read",
+		"起動時",
+		"停止",
+		"signal を含まない duration / datetime / file の構成（組合せ含む）",
+	} {
+		if !strings.Contains(agents, want) {
+			t.Errorf("AGENTS.md is missing current-contract documentation %q", want)
+		}
+	}
+	if strings.Contains(agents, "--release-on") {
+		t.Error("AGENTS.md advertises removed --release-on syntax")
+	}
+}
+
+func readRepositoryDocumentation(t *testing.T, name string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("..", "..", name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return strings.ReplaceAll(string(content), "\r\n", "\n")
+}
 
 func TestRunPreservesBinaryInputWithZeroDelay(t *testing.T) {
 	input := make([]byte, 256*3)

@@ -918,13 +918,14 @@ func TestRunPastAbsoluteDeadlineDoesNotOverrideInitialFileFatal(t *testing.T) {
 
 func TestRunArmsAbsoluteDeadlineBeforeInitialFileProbe(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
-	var timerCreated, timerStopped bool
+	var timerCreated bool
+	timerStopped := make(chan struct{})
 	clock := runtimeClock{
 		now:      func() time.Time { return now },
 		location: time.UTC,
 		newTimer: func(time.Duration) (<-chan time.Time, func()) {
 			timerCreated = true
-			return make(chan time.Time), func() { timerStopped = true }
+			return make(chan time.Time), func() { close(timerStopped) }
 		},
 	}
 	var output, diagnostics bytes.Buffer
@@ -939,7 +940,9 @@ func TestRunArmsAbsoluteDeadlineBeforeInitialFileProbe(t *testing.T) {
 	if !timerCreated {
 		t.Fatal("absolute deadline was not armed before initial file probe")
 	}
-	if !timerStopped {
+	select {
+	case <-timerStopped:
+	case <-time.After(testTimeout):
 		t.Fatal("absolute deadline timer was not stopped on initial probe failure")
 	}
 }

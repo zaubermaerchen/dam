@@ -31,9 +31,9 @@ Arguments:
   CONDITION
         A condition is one of:
           duration:DURATION
-              A Go duration (such as 500ms, 3s, or 2m) starts after the
-              first non-empty stdin read (except 0s, which is immediate).
-              Multiple duration conditions share that starting read.
+              A positive Go duration (such as 500ms, 3s, or 2m) starts after
+              the first non-empty stdin read. A 0s duration is immediate.
+              Multiple positive duration conditions share that starting read.
           datetime:YYYY-MM-DDTHH:MM[:SS]
               An absolute local datetime monitored from startup. Multiple
               datetime conditions are allowed.

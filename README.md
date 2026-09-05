@@ -1,11 +1,11 @@
 # dam
 
-`dam` is a release gate for Unix pipelines. With a relative duration, it starts
-a timer when the first non-empty read from standard input completes and holds
-the beginning of the stream until that duration elapses. The gate can instead
-be opened by an absolute local datetime, `SIGUSR1`, `SIGUSR2`, or the presence
-of a regular file. It is a one-way gate: once released, it stays open and
-forwards the rest of the stream unchanged. It also reports its version to
+`dam` is a release gate for Unix pipelines. With a positive relative duration,
+it starts a timer when the first non-empty read from standard input completes
+and holds the beginning of the stream until that duration elapses. The gate can
+instead be opened by an absolute local datetime, `SIGUSR1`, `SIGUSR2`, or the
+presence of a regular file. It is a one-way gate: once released, it stays open
+and forwards the rest of the stream unchanged. It also reports its version to
 stdout without reading standard input.
 
 ```text
@@ -165,8 +165,9 @@ monitoring contract.
 
 ## Stream behavior
 
-- Every duration condition starts on the first non-empty read from stdin, not
-  when the process starts. Every datetime condition is monitored from startup.
+- Every positive duration condition starts on the first non-empty read from
+  stdin, not when the process starts. A `0s` duration is satisfied immediately.
+  Every datetime condition is monitored from startup.
   With no input, a relative timer is never started and `dam` exits normally
   without waiting for a datetime condition.
 - Each configured signal is monitored after argument validation and before the

@@ -16,9 +16,10 @@ import (
 
 func TestParseConfigBuildsCompoundReleaseGroupsInConfigurationOrder(t *testing.T) {
 	config, err := parseConfig([]string{
-		"--release-on", "signal:USR1 && file:first",
-		"250ms",
-		"--release-on=file:second && signal:SIGUSR2",
+		"signal:USR1 && file:first",
+		"--or",
+		"duration:250ms",
+		"--or=file:second && signal:SIGUSR2",
 	})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
@@ -28,6 +29,7 @@ func TestParseConfigBuildsCompoundReleaseGroupsInConfigurationOrder(t *testing.T
 			{kind: "signal", source: "SIGUSR1"},
 			{kind: "file", source: "first"},
 		}},
+		{members: []releaseCondition{newDurationReleaseCondition(250 * time.Millisecond)}},
 		{members: []releaseCondition{
 			{kind: "file", source: "second"},
 			{kind: "signal", source: "SIGUSR2"},
@@ -47,15 +49,106 @@ func TestParseConfigBuildsCompoundReleaseGroupsInConfigurationOrder(t *testing.T
 	}
 }
 
+func TestParseConfigAcceptsPositionalConditionsAndExplicitOR(t *testing.T) {
+	config, err := parseConfigAt([]string{
+		"--buffer-size=1K",
+		"duration:250ms",
+		"--or",
+		"datetime:2026-12-31T23:59:07",
+		"--buffer-size",
+		"2K",
+		"--or=signal:SIGUSR1 && file:ready",
+	}, time.UTC)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	want := []releaseGroup{
+		{members: []releaseCondition{newDurationReleaseCondition(250 * time.Millisecond)}},
+		{members: []releaseCondition{newDatetimeReleaseCondition(time.Date(2026, time.December, 31, 23, 59, 7, 0, time.UTC))}},
+		{members: []releaseCondition{
+			{kind: "signal", source: "SIGUSR1"},
+			{kind: "file", source: "ready"},
+		}},
+	}
+	if !reflect.DeepEqual(config.groups, want) {
+		t.Fatalf("groups = %#v, want %#v", config.groups, want)
+	}
+	if got, want := config.signals, []string{"SIGUSR1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+	if got, want := config.files, []string{"ready"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("files = %v, want %v", got, want)
+	}
+	if got, want := config.bufferSize, 2*1024; got != want {
+		t.Fatalf("buffer size = %d, want %d", got, want)
+	}
+}
+
+func TestParseConfigAcceptsTimedMembersInsideANDGroups(t *testing.T) {
+	config, err := parseConfig([]string{
+		"duration:1s && datetime:2026-12-31T23:59",
+		"--or=signal:USR2 && duration:2s",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if len(config.groups) != 2 || len(config.groups[0].members) != 2 || len(config.groups[1].members) != 2 {
+		t.Fatalf("groups = %#v, want two two-member groups", config.groups)
+	}
+	if got, want := config.groups[0].members[0].kind, "duration"; got != want {
+		t.Fatalf("first group first member kind = %q, want %q", got, want)
+	}
+	if got, want := config.groups[0].members[1].kind, "datetime"; got != want {
+		t.Fatalf("first group second member kind = %q, want %q", got, want)
+	}
+	if got, want := config.groups[1].members[0].source, "SIGUSR2"; got != want {
+		t.Fatalf("second group first member source = %q, want %q", got, want)
+	}
+	if got, want := config.groups[1].members[1].duration, 2*time.Second; got != want {
+		t.Fatalf("second group second member duration = %s, want %s", got, want)
+	}
+}
+
+func TestParseConfigTracksImmediateDurationRegardlessOfConditionOrder(t *testing.T) {
+	config, err := parseConfig([]string{"signal:USR1", "--or", "duration:1s", "--or", "duration:0s"})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if !config.immediateDuration {
+		t.Fatal("config did not track an immediate duration")
+	}
+}
+
+func TestParseConfigRejectsMissingOrAdjacentORConditionsAndRemovedSyntax(t *testing.T) {
+	tests := [][]string{
+		{"--or", "signal:USR1"},
+		{"signal:USR1", "--or"},
+		{"signal:USR1", "--or="},
+		{"signal:USR1", "--or", "--buffer-size", "1K"},
+		{"signal:USR1", "file:ready"},
+		{"--release-on", "signal:USR1"},
+		{"--release-on=signal:USR1"},
+		{"1s"},
+		{"2026-12-31T23:59"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if _, err := parseConfig(args); err == nil {
+				t.Fatal("parseConfig unexpectedly accepted removed or incomplete syntax")
+			}
+		})
+	}
+}
+
 func TestParseConfigCompoundReleaseUsesExactSeparatorWithoutTrimming(t *testing.T) {
-	config, err := parseConfig([]string{"--release-on", "file:ready  && signal:USR1"})
+	config, err := parseConfig([]string{"file:ready  && signal:USR1"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
 	if got, want := config.groups[0].members[0].source, "ready "; got != want {
 		t.Fatalf("first file source = %q, want %q", got, want)
 	}
-	pathConfig, err := parseConfig([]string{"--release-on", "file:a&&b"})
+	pathConfig, err := parseConfig([]string{"file:a&&b"})
 	if err != nil {
 		t.Fatalf("parseConfig rejected non-separator ampersands: %v", err)
 	}
@@ -69,7 +162,7 @@ func TestParseConfigCompoundReleaseUsesExactSeparatorWithoutTrimming(t *testing.
 		"file:first &&  && file:second",
 	} {
 		t.Run(value, func(t *testing.T) {
-			if _, err := parseConfig([]string{"--release-on", value}); err == nil {
+			if _, err := parseConfig([]string{value}); err == nil {
 				t.Fatal("parseConfig unexpectedly accepted an empty compound member")
 			}
 		})
@@ -174,7 +267,7 @@ func TestRuntimeFatalFromUnsatisfiedCompoundFileFailsInvocation(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"--release-on", "file:" + bad + " && file:" + other}, input, output, &diagnostics)
+		status <- run([]string{"file:" + bad + " && file:" + other}, input, output, &diagnostics)
 	}()
 	select {
 	case <-output.writeTimes:
@@ -232,7 +325,7 @@ func TestRunFileAndFileGroupWaitsForEveryMember(t *testing.T) {
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
-		status <- run([]string{"--release-on", "file:" + first + " && file:" + second}, input, output, &diagnostics)
+		status <- run([]string{"file:" + first + " && file:" + second}, input, output, &diagnostics)
 	}()
 
 	select {
@@ -266,7 +359,7 @@ func TestRunFileAndFileGroupWaitsForEveryMember(t *testing.T) {
 
 func TestRunCompoundFileGroupKeepsEmptyEOFCompatibility(t *testing.T) {
 	dir := t.TempDir()
-	args := []string{"--release-on", "file:" + filepath.Join(dir, "first") + " && file:" + filepath.Join(dir, "second")}
+	args := []string{"file:" + filepath.Join(dir, "first") + " && file:" + filepath.Join(dir, "second")}
 	var output, diagnostics bytes.Buffer
 	status := make(chan int, 1)
 	go func() {
@@ -288,8 +381,8 @@ func TestRunCompoundFileGroupKeepsEmptyEOFCompatibility(t *testing.T) {
 func TestRunCompoundFileGroupKeepsDeadlineCompatibility(t *testing.T) {
 	dir := t.TempDir()
 	args := []string{
-		"20ms",
-		"--release-on",
+		"duration:20ms",
+		"--or",
 		"file:" + filepath.Join(dir, "first") + " && file:" + filepath.Join(dir, "second"),
 	}
 	var output, diagnostics bytes.Buffer

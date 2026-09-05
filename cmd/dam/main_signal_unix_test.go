@@ -504,25 +504,25 @@ func TestSignalHelperProcess(t *testing.T) {
 func signalHelperArgs(mode string) []string {
 	switch mode {
 	case "preinput":
-		return []string{"--release-on=signal:USR1"}
+		return []string{"signal:USR1"}
 	case "usr2-preinput", "usr2-held", "usr2-only":
-		return []string{"--release-on=signal:USR2"}
+		return []string{"signal:USR2"}
 	case "usr1-only":
-		return []string{"--release-on=signal:USR1"}
+		return []string{"signal:USR1"}
 	case "both-held":
-		return []string{"--release-on=signal:USR1", "--release-on=signal:USR2"}
+		return []string{"signal:USR1", "--or", "signal:USR2"}
 	case "duration":
-		return []string{"100ms", "--release-on=signal:USR1"}
+		return []string{"duration:100ms", "--or", "signal:USR1"}
 	case "zero":
-		return []string{"0s", "--release-on=signal:USR1"}
+		return []string{"duration:0s", "--or", "signal:USR1"}
 	case "duration-usr2":
-		return []string{"100ms", "--release-on=signal:USR2"}
+		return []string{"duration:100ms", "--or", "signal:USR2"}
 	case "long-duration-usr2":
-		return []string{"1h", "--release-on=signal:USR2"}
+		return []string{"duration:1h", "--or", "signal:USR2"}
 	case "zero-usr2":
-		return []string{"0s", "--release-on=signal:USR2"}
+		return []string{"duration:0s", "--or", "signal:USR2"}
 	case "and-signal-file":
-		return []string{"--release-on", "signal:USR1 && file:" + os.Getenv("DAM_SIGNAL_HELPER_FILE")}
+		return []string{"signal:USR1 && file:" + os.Getenv("DAM_SIGNAL_HELPER_FILE")}
 	default:
 		panic("unknown signal helper mode")
 	}

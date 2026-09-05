@@ -393,7 +393,7 @@ func startSignalHelper(t *testing.T, mode string) *signalHelper {
 	cmd := exec.Command(os.Args[0], "-test.run=TestSignalHelperProcess")
 	cmd.Env = append(os.Environ(), "DAM_SIGNAL_HELPER=1", "DAM_SIGNAL_HELPER_MODE="+mode)
 	file := ""
-	if mode == "and-signal-file" {
+	if mode == "and-signal-file" || mode == "mixed-all" {
 		file = filepath.Join(t.TempDir(), "ready")
 		cmd.Env = append(cmd.Env, "DAM_SIGNAL_HELPER_FILE="+file)
 	}
@@ -521,6 +521,15 @@ func signalHelperArgs(mode string) []string {
 		return []string{"duration:1h", "--or", "signal:USR2"}
 	case "zero-usr2":
 		return []string{"duration:0s", "--or", "signal:USR2"}
+	case "duration-and-signal":
+		return []string{"duration:0s && signal:USR1"}
+	case "mixed-all":
+		deadline := time.Now().Add(time.Hour).Format("2006-01-02T15:04:05")
+		return []string{
+			"duration:1h && datetime:" + deadline + " && signal:USR1 && file:" + os.Getenv("DAM_SIGNAL_HELPER_FILE"),
+			"--or",
+			"signal:USR2",
+		}
 	case "and-signal-file":
 		return []string{"signal:USR1 && file:" + os.Getenv("DAM_SIGNAL_HELPER_FILE")}
 	default:

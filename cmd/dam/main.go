@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -290,36 +289,12 @@ func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 		}
 	}
 	if !hasCondition {
-		return runConfig{}, fmt.Errorf("usage: dam CONDITION [--or CONDITION]...")
+		return runConfig{}, fmt.Errorf("usage: dam CONDITION [--or CONDITION]... [--buffer-size SIZE]")
 	}
 	if pendingOR {
 		return runConfig{}, fmt.Errorf("--or requires a condition")
 	}
 	return config, nil
-}
-
-func parseDeadlineArgument(value string, location *time.Location) (*time.Duration, *time.Time, error) {
-	delay, durationErr := time.ParseDuration(value)
-	if durationErr == nil {
-		if delay < 0 {
-			return nil, nil, fmt.Errorf("duration must not be negative")
-		}
-		return &delay, nil, nil
-	}
-
-	deadline, absoluteErr := parseAbsoluteDeadline(value, location)
-	if absoluteErr == nil {
-		return nil, &deadline, nil
-	}
-	return nil, nil, fmt.Errorf("invalid deadline %q: want a Go duration or YYYY-MM-DDTHH:MM[:SS] local datetime", value)
-}
-
-func isDeadlineToken(value string, location *time.Location) bool {
-	if _, err := time.ParseDuration(value); err == nil {
-		return true
-	}
-	_, err := parseAbsoluteDeadline(value, location)
-	return err == nil
 }
 
 func normalizeLocation(location *time.Location) *time.Location {
@@ -465,53 +440,6 @@ func earliestLocalInstant(parsed time.Time, year int, month time.Month, day, hou
 	return best
 }
 
-type deadlineMonitorState struct {
-	done chan struct{}
-
-	stopOnce  sync.Once
-	mu        sync.Mutex
-	stopped   bool
-	stopTimer func()
-}
-
-func (state *deadlineMonitorState) arm(stopTimer func()) bool {
-	state.mu.Lock()
-	if state.stopped {
-		state.mu.Unlock()
-		if stopTimer != nil {
-			stopTimer()
-		}
-		return false
-	}
-	state.stopTimer = stopTimer
-	state.mu.Unlock()
-	return true
-}
-
-func (state *deadlineMonitorState) disarm() {
-	state.mu.Lock()
-	stopTimer := state.stopTimer
-	state.stopTimer = nil
-	state.mu.Unlock()
-	if stopTimer != nil {
-		stopTimer()
-	}
-}
-
-func (state *deadlineMonitorState) stop() {
-	state.stopOnce.Do(func() {
-		state.mu.Lock()
-		state.stopped = true
-		stopTimer := state.stopTimer
-		state.stopTimer = nil
-		state.mu.Unlock()
-		close(state.done)
-		if stopTimer != nil {
-			stopTimer()
-		}
-	})
-}
-
 func releaseChannelReady(release <-chan struct{}) bool {
 	if release == nil {
 		return false
@@ -522,97 +450,6 @@ func releaseChannelReady(release <-chan struct{}) bool {
 	default:
 		return false
 	}
-}
-
-func startDeadlineMonitor(deadline *time.Time, now func() time.Time, coordinator *releaseCoordinator, newTimer func(time.Duration) (<-chan time.Time, func())) func() {
-	if deadline == nil || coordinator == nil || releaseChannelReady(coordinator.release) {
-		return nil
-	}
-	if now == nil {
-		now = time.Now
-	}
-	current := now()
-	wait := deadline.Sub(current)
-	if wait <= 0 {
-		// An already elapsed deadline is an immediately satisfied release
-		// condition. Initial file probes have completed before this function is
-		// called, so their fatal results still retain precedence.
-		_ = coordinator.requestOpen()
-		return nil
-	}
-	if newTimer == nil {
-		newTimer = defaultRuntimeClock().newTimer
-	}
-
-	// Arm the first timer synchronously. This ensures the absolute deadline
-	// is active before executeWithClock invokes readiness hooks or starts the
-	// first stdin read.
-	state := &deadlineMonitorState{done: make(chan struct{})}
-	current = now()
-	wait = deadline.Sub(current)
-	if wait <= 0 {
-		_ = coordinator.requestOpen()
-		return nil
-	}
-	capped := false
-	if !current.Add(wait).Equal(*deadline) {
-		wait = time.Duration(1<<63 - 1)
-		capped = true
-	}
-	timerC, stopTimer := newTimer(wait)
-	if timerC == nil {
-		if stopTimer != nil {
-			stopTimer()
-		}
-		return nil
-	}
-	if !state.arm(stopTimer) {
-		return nil
-	}
-
-	go func() {
-		for {
-			select {
-			case <-timerC:
-				state.disarm()
-				if !capped {
-					_ = coordinator.requestOpen()
-					return
-				}
-				if releaseChannelReady(coordinator.release) {
-					return
-				}
-				current := now()
-				wait := deadline.Sub(current)
-				if wait <= 0 {
-					_ = coordinator.requestOpen()
-					return
-				}
-				capped = false
-				if !current.Add(wait).Equal(*deadline) {
-					wait = time.Duration(1<<63 - 1)
-					capped = true
-				}
-				timerC, stopTimer = newTimer(wait)
-				if timerC == nil {
-					if stopTimer != nil {
-						stopTimer()
-					}
-					return
-				}
-				if !state.arm(stopTimer) {
-					return
-				}
-			case <-coordinator.release:
-				state.disarm()
-				return
-			case <-state.done:
-				state.disarm()
-				return
-			}
-		}
-	}()
-	return state.stop
 }
 
 func parseBufferSize(value string) (int, error) {

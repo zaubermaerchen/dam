@@ -1019,77 +1019,6 @@ func TestRunEmptyInputDoesNotWaitForAbsoluteDeadline(t *testing.T) {
 	}
 }
 
-func TestStartDeadlineMonitorArmsBeforeReturning(t *testing.T) {
-	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
-	deadline := now.Add(time.Minute)
-	coordinator := newReleaseCoordinator(false)
-	armed := make(chan struct{}, 1)
-	timerC := make(chan time.Time)
-	stop := startDeadlineMonitor(&deadline, func() time.Time { return now }, coordinator, func(time.Duration) (<-chan time.Time, func()) {
-		armed <- struct{}{}
-		return timerC, func() {}
-	})
-	if stop == nil {
-		t.Fatal("startDeadlineMonitor returned nil cleanup for a future deadline")
-	}
-	select {
-	case <-armed:
-	default:
-		t.Fatal("startDeadlineMonitor returned before arming its timer")
-	}
-	stop()
-}
-
-func TestStartDeadlineMonitorStopsWhenCoordinatorOpens(t *testing.T) {
-	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
-	deadline := now.Add(time.Minute)
-	coordinator := newReleaseCoordinator(false)
-	timerC := make(chan time.Time)
-	armed := make(chan struct{}, 1)
-	stopped := make(chan struct{})
-	stop := startDeadlineMonitor(&deadline, func() time.Time { return now }, coordinator, func(time.Duration) (<-chan time.Time, func()) {
-		armed <- struct{}{}
-		return timerC, func() { close(stopped) }
-	})
-	if stop == nil {
-		t.Fatal("startDeadlineMonitor returned nil cleanup for a future deadline")
-	}
-	select {
-	case <-armed:
-	case <-time.After(testTimeout):
-		t.Fatal("startDeadlineMonitor did not arm its timer")
-	}
-	if err := coordinator.requestOpen(); err != nil {
-		t.Fatalf("requestOpen returned error: %v", err)
-	}
-	select {
-	case <-stopped:
-	case <-time.After(testTimeout):
-		t.Fatal("deadline timer was not stopped after another condition opened the gate")
-	}
-	stop()
-}
-
-func TestStartDeadlineMonitorSkipsAlreadyOpenCoordinator(t *testing.T) {
-	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
-	deadline := now.Add(time.Minute)
-	coordinator := newReleaseCoordinator(false)
-	if err := coordinator.requestOpen(); err != nil {
-		t.Fatalf("requestOpen returned error: %v", err)
-	}
-	armed := false
-	stop := startDeadlineMonitor(&deadline, func() time.Time { return now }, coordinator, func(time.Duration) (<-chan time.Time, func()) {
-		armed = true
-		return make(chan time.Time), func() {}
-	})
-	if stop != nil {
-		t.Fatal("startDeadlineMonitor returned cleanup for an already-open coordinator")
-	}
-	if armed {
-		t.Fatal("startDeadlineMonitor armed a timer for an already-open coordinator")
-	}
-}
-
 func TestParseConfigAcceptsUSR2AliasesAndPreservesOrder(t *testing.T) {
 	config, err := parseConfig([]string{
 		"signal:USR2",
@@ -1420,8 +1349,9 @@ func TestParseConfigRejectsInvalidReleaseConditions(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
+		want string
 	}{
-		{name: "missing all", args: nil},
+		{name: "missing all", args: nil, want: "usage: dam CONDITION [--or CONDITION]... [--buffer-size SIZE]"},
 		{name: "duplicate duration", args: []string{"duration:1s", "duration:2s"}},
 		{name: "missing release value", args: []string{"--release-on"}},
 		{name: "empty release value", args: []string{"--release-on="}},
@@ -1436,8 +1366,12 @@ func TestParseConfigRejectsInvalidReleaseConditions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := parseConfig(test.args); err == nil {
+			_, err := parseConfig(test.args)
+			if err == nil {
 				t.Fatal("parseConfig unexpectedly succeeded")
+			}
+			if test.want != "" && err.Error() != test.want {
+				t.Fatalf("parseConfig error = %q, want %q", err, test.want)
 			}
 		})
 	}

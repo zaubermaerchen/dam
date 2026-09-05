@@ -32,15 +32,19 @@ Arguments:
         A condition is one of:
           duration:DURATION
               A Go duration (such as 500ms, 3s, or 2m) starts after the
-              first non-empty stdin read.
+              first non-empty stdin read (except 0s, which is immediate).
+              Multiple duration conditions share that starting read.
           datetime:YYYY-MM-DDTHH:MM[:SS]
-              An absolute local datetime monitored from startup.
+              An absolute local datetime monitored from startup. Multiple
+              datetime conditions are allowed.
           signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2
-              Release on the configured Unix signal.
+              Release on the configured Unix signal. Alias spellings are
+              equivalent on supported Unix targets.
           file:PATH
-              Release when PATH exists as a regular file.
-        Conditions joined by " && " inside one argument must all be
-        satisfied. Use --or between alternative condition arguments.
+              Release when PATH resolves to a regular file on any target.
+        Conditions joined by " && " inside one argument form an AND group.
+        Quote AND groups so the shell passes " && " literally. Every member
+        is latched once satisfied. Use --or between alternative conditions.
 
 Options:
   --or CONDITION
@@ -50,6 +54,12 @@ Options:
   --buffer-size SIZE
         Set the maximum pre-release buffer size (default: 64K).
         SIZE is a positive byte count or a binary K/k, M/m, or G/g value.
+        Also accepted as --buffer-size=SIZE.
+
+Notes:
+        Equivalent duration values and resolved datetime values share one
+        latched event. Time and file monitors stop after release or empty
+        stdin reaches EOF.
 
   -h, --help
         Show this help and exit.

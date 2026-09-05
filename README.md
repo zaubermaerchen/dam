@@ -9,7 +9,7 @@ forwards the rest of the stream unchanged. It also reports its version to
 stdout without reading standard input.
 
 ```text
-producer | dam 3s | consumer
+producer | dam duration:3s | consumer
 ```
 
 ## Choosing a tool
@@ -27,7 +27,7 @@ they serve different purposes:
 For example:
 
 ```bash
-slow-producer | dam 2099-12-31T23:59 | consumer
+slow-producer | dam datetime:2099-12-31T23:59 | consumer
 ```
 
 Here, `slow-producer` starts immediately and can fill `dam`'s bounded buffer,
@@ -47,21 +47,43 @@ go build -o dam ./cmd/dam
 ## Usage
 
 ```text
-dam DEADLINE [--buffer-size SIZE]
-dam [DEADLINE] --release-on TYPE:SOURCE [--release-on TYPE:SOURCE]... [--buffer-size SIZE]
+dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
 dam -h
 dam --help
 dam --version
 ```
 
-`DEADLINE` accepts either Go's `time.ParseDuration` syntax (for example
-`500ms`, `3s`, `2m`, or `1h30m`) or an absolute local datetime in exactly
-`YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS` form. The latter is resolved using
-the local timezone at argument validation time. Seconds default to `00` when
-omitted. Years must be between `0001` and `9999`; invalid calendar dates,
-timezone suffixes, fractional seconds, and non-existent local times during a
-daylight-saving transition are rejected. If a local time occurs twice, the
-earlier instant is selected.
+Every release condition is a prefixed positional `CONDITION`:
+
+```text
+duration:DURATION
+datetime:YYYY-MM-DDTHH:MM[:SS]
+signal:USR1
+signal:SIGUSR1
+signal:USR2
+signal:SIGUSR2
+file:PATH
+```
+
+`duration:DURATION` accepts Go's `time.ParseDuration` syntax (for example
+`500ms`, `3s`, `2m`, or `1h30m`). `0s` is valid and is immediately satisfied;
+negative and malformed durations are errors. Positive duration conditions
+start from the same first non-empty stdin read, and multiple distinct durations
+are allowed.
+
+`datetime:YYYY-MM-DDTHH:MM[:SS]` is an absolute local datetime monitored from
+startup. Seconds default to `00` when omitted. Years must be between `0001` and
+`9999`; invalid calendar dates, timezone suffixes, fractional seconds, and
+non-existent local times during a daylight-saving transition are rejected. If a
+local time occurs twice, the earlier instant is selected. Multiple distinct
+datetime conditions are allowed.
+
+`signal:USR1` and `signal:SIGUSR1` are equivalent, as are `signal:USR2` and
+`signal:SIGUSR2`. Signal conditions are available on supported Unix targets.
+`file:PATH` releases when `PATH` resolves to a regular file on every target.
+The first colon separates the type from the source, so additional colons in a
+file path, including a Windows drive-letter colon, are preserved. Paths are
+not normalized or expanded; relative paths use the startup working directory.
 
 `--buffer-size SIZE` and `--buffer-size=SIZE` set the maximum amount of
 pre-release stream data held in memory. The default is `64K`. `SIZE` must be a
@@ -71,58 +93,82 @@ positive integer number of bytes, or a positive integer followed by `K`, `k`,
 invalid. This option does not itself provide a release condition.
 
 ```bash
-printf 'hello' | ./dam 3s
+printf 'hello' | ./dam duration:3s
 ```
 
-`0s` is valid and forwards input immediately. When present, malformed and
-negative durations are errors. A release condition may be used without a
-deadline; at least one deadline or release condition is required. At most one
-deadline is allowed. A relative duration starts after the first non-empty
-read, while an absolute deadline is active from startup and does not wait for
-stdin. The deadline and each `--release-on TYPE:SOURCE` option
-may appear in either order. The release-on option may be repeated and accepts
-both separated (`--release-on signal:USR1`) and equals
-(`--release-on=signal:USR1`) forms. Conditions joined by the exact literal
-` && ` inside one `--release-on` option form an AND group: every member must be
-satisfied. Multiple `--release-on` options are alternatives (OR). For example,
-quote a compound value in a POSIX shell:
+At least one condition is required. Conditions and `--buffer-size` may appear
+in any order. Use `--or CONDITION` between alternatives; the equals form
+`--or=CONDITION` is also accepted. Multiple alternatives are combined with OR.
+Conditions joined by the exact literal ` && ` inside one argument form an AND
+group: every member must be satisfied. Quote an AND group so the shell passes
+the literal ` && ` to `dam`:
 
 ```bash
-dam --release-on 'signal:USR1 && file:/tmp/ready'
+dam 'signal:USR1 && file:/tmp/ready'
 ```
 
 In PowerShell, single quotes provide the same protection. In `cmd.exe`, use
 double quotes around a compound value, for example
-`dam --release-on "file:C:\ready && signal:USR1"`; shell quoting only affects
+`dam "file:C:\ready && file:C:\approved"`; shell quoting only affects
 how the argument reaches `dam`, not the condition parser itself.
 
-Each member is latched once satisfied, so a file may be removed after its latch
-is satisfied without closing the gate. `signal:USR1` and `signal:SIGUSR1` are
-equivalent, as are `signal:USR2` and `signal:SIGUSR2`; other types, signal
-names, and casing are invalid. A `file:PATH` condition opens the gate when
-`PATH` names a regular file. The first colon separates the condition type from
-the path, so additional colons in `PATH`, including a Windows drive-letter
-colon, are preserved. The path must not be empty. Relative paths are resolved
-from the process's startup working directory; shell-style `~` and environment
-variable expansion and path normalization are not performed.
+Each AND member is latched once satisfied, so satisfaction order does not
+matter and a file may be removed after its latch without closing the gate.
+Equivalent duration values share one logical latch based on their parsed value
+(for example, `duration:60s` and `duration:1m`), and equivalent datetime values
+share one latch based on their resolved instant. Distinct values remain
+independent conditions. A file path must not be empty; shell-style `~` and
+environment-variable expansion are not performed.
 
 `--version` is valid only as the sole argument and prints `dam <version>\n` to
 stdout. Development builds use `dev`; release builds replace the version at
-link time.
+link time. The release workflow verifies the injected version with the Linux
+amd64 artifact before publishing release archives.
 
 `-h` and `--help` are equivalent. An exact help argument takes precedence over
 all other arguments, prints the help text to stdout, and exits successfully
 without reading stdin or starting release monitoring. `--version` also writes
 its informational output to stdout without reading stdin. Forms such as
-`--help=x`, `--release-on=--help`, and `-help` remain ordinary argument errors.
+`--help=x`, `-help`, and other non-exact spellings remain ordinary argument
+errors.
 Argument errors do not print the full help text automatically.
+
+## Migrating from v0.3.x
+
+Release note: v0.4.0 is a breaking release for the command-line grammar. Bare
+deadlines and the `--release-on` option are removed; prefix each condition and join
+alternatives with `--or` instead. Existing invocations migrate as follows:
+
+```text
+dam 30s
+  -> dam duration:30s
+
+dam 2026-09-03T18:00
+  -> dam datetime:2026-09-03T18:00
+
+dam --release-on signal:USR1
+  -> dam signal:USR1
+
+dam --release-on=signal:USR1
+  -> dam signal:USR1
+
+dam --release-on signal:USR1 --release-on file:/tmp/ready
+  -> dam signal:USR1 --or file:/tmp/ready
+
+dam --release-on "signal:USR1 && file:/tmp/ready" --release-on signal:USR2
+  -> dam "signal:USR1 && file:/tmp/ready" --or signal:USR2
+```
+
+The old forms above are migration references only and are rejected by v0.4.0.
+See the usage and stream behavior sections for the complete condition and
+monitoring contract.
 
 ## Stream behavior
 
-- A relative duration starts on the first non-empty read from stdin, not when
-  the process starts. An absolute local deadline is monitored before the
-  first read. With no input, a relative timer is never started and `dam` exits
-  normally without waiting for an absolute deadline.
+- Every duration condition starts on the first non-empty read from stdin, not
+  when the process starts. Every datetime condition is monitored from startup.
+  With no input, a relative timer is never started and `dam` exits normally
+  without waiting for a datetime condition.
 - Each configured signal is monitored after argument validation and before the
   first input read. Any configured signal received before input opens the gate
   for all later input.
@@ -132,13 +178,13 @@ Argument errors do not print the full help text automatically.
   gate only when its target is a regular file. A directory, FIFO, device,
   symlink loop, permission failure, or other file-status error is fatal while
   the gate is closed.
-- The positional duration/deadline and each release group are combined with OR:
-  the first satisfied release source opens the gate. Conditions within one
-  `--release-on` value joined by ` && ` are ANDed. No stream data is written to
-  stdout before a release occurs.
+- The positional conditions and each `--or` group are combined with OR: the
+  first satisfied release group opens the gate. Conditions within one argument
+  joined by ` && ` are ANDed. No stream data is written to stdout before a
+  release occurs.
 - All initial file checks finish before the first open decision. A fatal result
   from any initial check takes precedence over an existing regular file, `0s`,
-  a current or past absolute deadline, or a pending signal. While the gate
+  a current or past datetime, or a pending signal. While the gate
   remains closed, a fatal file result that has already been reported to the
   release coordinator also takes precedence over release events pending at the
   same decision point.
@@ -149,7 +195,7 @@ Argument errors do not print the full help text automatically.
   received while that barrier is running is latched for its group but cannot
   override an initial fatal.
 - EOF does not open the gate early. Data received before EOF is still held until
-  a duration, absolute deadline, signal, or file release. After the initial
+  a duration, datetime, signal, or file release. After the initial
   file checks succeed, empty stdin exits successfully without waiting for a
   configured release condition.
 - Input is preserved byte-for-byte, including binary data.
@@ -159,13 +205,13 @@ Argument errors do not print the full help text automatically.
   producer.
 - After release, the gate stays open and subsequent input is passed through
   without another delay.
-- Absolute-deadline and file monitoring stop when the gate opens or empty stdin
-  reaches EOF. An in-progress file check is not awaited and its later result is
-  ignored. The polling interval and exact detection latency are implementation
-  details, not a stable interface.
+- Duration, datetime, and file monitoring stop when the gate opens or empty
+  stdin reaches EOF. An in-progress file check is not awaited and its later
+  result is ignored. The polling interval and exact detection latency are
+  implementation details, not a stable interface.
 - Once configured, `SIGUSR1` and/or `SIGUSR2` remain intercepted and ignored
-  after release until the process exits, including when the duration, `0s`, an
-  absolute deadline, or a file condition opens the gate first. Unconfigured
+  after release until the process exits, including when a duration, `0s`, a
+  datetime, or a file condition opens the gate first. Unconfigured
   signals are not intercepted.
 - stdout contains stream data during normal operation. Help and version
   information are written to stdout; other usage messages and I/O errors are
@@ -173,13 +219,13 @@ Argument errors do not print the full help text automatically.
 
 ## Current scope
 
-The current implementation provides a duration-, absolute-deadline-,
+The current implementation provides a duration-, datetime-,
 `SIGUSR1`/`SIGUSR2`-, and file-based one-way gate plus help and version
 reporting. Repeated gate
 transitions, configurable polling, spill-to-disk behavior, and
 an initially-open mode are not implemented. File conditions work on Windows
 and other targets. Signal release is not available on unsupported targets;
-those builds accept duration, absolute-deadline, and file-only configurations,
+those builds accept duration, datetime, and file-only configurations,
 including their supported combinations, but reject any configuration containing
 a signal condition.
 

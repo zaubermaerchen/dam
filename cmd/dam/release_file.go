@@ -3,9 +3,7 @@ package main
 // This file coordinates release sources and polls configured filesystem paths.
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"slices"
 	"sync"
@@ -17,10 +15,8 @@ const (
 	filePollMaxInterval = 250 * time.Millisecond
 )
 
-// releaseCoordinator serializes release-condition latches and fatal
-// file-monitor observations. The mutex makes the OPEN/error boundary
-// deterministic: a fatal result that has been reported before requestOpen is
-// committed wins, while results after OPEN are ignored.
+// releaseCoordinator serializes release-condition latches and failures from
+// release monitors. The mutex makes the OPEN/error boundary deterministic.
 type releaseCoordinator struct {
 	mu sync.Mutex
 
@@ -222,9 +218,8 @@ func (c *releaseCoordinator) filePathSatisfiedLocked(path string) bool {
 	return state != nil && state.remaining == 0
 }
 
-// reportFileFatal ignores an error from a path whose file latch was already
-// satisfied. A satisfied member no longer needs monitoring, so a later probe
-// result for that path cannot turn the latched condition back into a failure.
+// reportFileFatal remains available for coordinator-level failure reporting;
+// file probes no longer call it because stat failures are retryable.
 func (c *releaseCoordinator) reportFileFatal(path string, err error) {
 	if err == nil {
 		return
@@ -309,15 +304,9 @@ type fileProbe func(path string) (bool, error)
 func probeFileRelease(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("cannot inspect release file %q: %w", path, err)
+		return false, nil
 	}
-	if !info.Mode().IsRegular() {
-		return false, fmt.Errorf("release file %q is not a regular file", path)
-	}
-	return true, nil
+	return info.Mode().IsRegular(), nil
 }
 
 type fileMonitor struct {
@@ -372,24 +361,18 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 	for index, path := range monitor.paths {
 		go func() {
 			ready, err := monitor.probe(path)
-			if errors.Is(err, fs.ErrNotExist) {
-				ready, err = false, nil
+			if err != nil {
+				ready = false
 			}
 			results <- fileProbeResult{index: index, ready: ready, err: err}
 		}()
 	}
 
 	orderedResults := collectOrderedInitialFileProbeResults(results, len(monitor.paths))
-	firstFatal, anyReady := summarizeInitialFileProbeResults(orderedResults)
-	if firstFatal != nil {
-		// Report the ordered initial fatal before applying ready results so the
-		// startup barrier wins even for callers using a non-initializing legacy
-		// coordinator.
-		coordinator.reportFatal(firstFatal)
-	}
-	if firstFatal == nil && len(coordinator.groups) > 0 {
+	_, anyReady := summarizeInitialFileProbeResults(orderedResults)
+	if len(coordinator.groups) > 0 {
 		for _, result := range orderedResults {
-			if result.ready {
+			if result.err == nil && result.ready {
 				_ = coordinator.reportFileReady(monitor.paths[result.index])
 			}
 		}
@@ -397,12 +380,7 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 	if err := coordinator.finishInitial(); err != nil {
 		return monitor, err
 	}
-	if firstFatal != nil {
-		return monitor, firstFatal
-	}
 	if len(coordinator.groups) == 0 && anyReady {
-		// Keep the legacy monitor path's fatal-before-open ordering. Grouped
-		// coordinators record ready latches above and decide OPEN at the barrier.
 		if err := coordinator.requestOpen(); err != nil {
 			return monitor, err
 		}
@@ -442,12 +420,11 @@ func collectOrderedInitialFileProbeResults(results <-chan fileProbeResult, count
 
 func summarizeInitialFileProbeResults(orderedResults []fileProbeResult) (firstFatal error, anyReady bool) {
 	for _, result := range orderedResults {
-		if result.err != nil && firstFatal == nil {
-			firstFatal = result.err
-		}
-		anyReady = anyReady || result.ready
+		anyReady = anyReady || (result.err == nil && result.ready)
 	}
-	return firstFatal, anyReady
+	// The first return is retained for callers that still inspect the old
+	// result shape; file probe errors are retryable and never become fatal.
+	return nil, anyReady
 }
 
 func (m *fileMonitor) Close() {
@@ -473,12 +450,8 @@ func (m *fileMonitor) watchPath(path string) {
 			return
 		}
 		ready, err := m.probe(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			ready, err = false, nil
-		}
 		if err != nil {
-			m.coordinator.reportFileFatal(path, err)
-			return
+			ready = false
 		}
 		if ready {
 			_ = m.coordinator.reportFileReady(path)

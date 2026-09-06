@@ -177,7 +177,7 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 	}
 	// Datetime conditions must be armed before the initial file probes. The
 	// coordinator remains initializing so a due datetime can only become a
-	// pending release; an initial file fatal still wins at the barrier.
+	// pending release while all initial file probes complete.
 	if err := timedMonitor.startDatetimes(); err != nil {
 		writeDiagnostic(diagnostics, err)
 		cleanup()

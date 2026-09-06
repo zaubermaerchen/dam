@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -229,64 +230,113 @@ func TestReleaseCoordinatorCompoundGroupsUseORAcrossOptions(t *testing.T) {
 	}
 }
 
-func TestInitialCompoundFileProbeFatalWinsAcrossORGroupsInConfigurationOrder(t *testing.T) {
-	firstFatal := errors.New("first initial fatal")
-	secondFatal := errors.New("second initial fatal")
+func TestInitialCompoundFileProbeErrorsAreRetried(t *testing.T) {
 	coordinator := newReleaseCoordinatorWithGroups(true, []releaseGroup{
 		{members: []releaseCondition{{kind: "file", source: "first"}}},
 		{members: []releaseCondition{{kind: "file", source: "second"}}},
 	})
+	t.Cleanup(coordinator.stopFiles)
+	var mu sync.Mutex
+	calls := make(map[string]int)
 	monitor, err := newFileMonitorWithProbe([]string{"first", "second"}, coordinator, func(path string) (bool, error) {
-		if path == "first" {
-			return false, firstFatal
+		mu.Lock()
+		calls[path]++
+		call := calls[path]
+		mu.Unlock()
+		if call == 1 {
+			return false, errors.New("transient initial probe failure")
 		}
-		return false, secondFatal
+		return path == "first", nil
 	}, time.Millisecond)
 	if monitor == nil {
 		t.Fatal("newFileMonitorWithProbe returned nil monitor")
 	}
-	if !errors.Is(err, firstFatal) {
-		t.Fatalf("initial error = %v, want %v", err, firstFatal)
+	t.Cleanup(monitor.Close)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
 	}
-	if errors.Is(err, secondFatal) {
-		t.Fatalf("initial error = %v, selected later configured fatal", err)
+	if got := coordinator.fatalError(); got != nil {
+		t.Fatalf("initial probe error became fatal: %v", got)
 	}
 	select {
 	case <-coordinator.release:
-		t.Fatal("initial fatal opened the gate")
-	default:
+	case <-time.After(testTimeout):
+		t.Fatal("retryable initial probe did not release after the file became regular")
+	}
+	mu.Lock()
+	firstCalls := calls["first"]
+	mu.Unlock()
+	if firstCalls < 2 {
+		t.Fatalf("first probe calls = %d, want an initial error followed by a retry", firstCalls)
 	}
 }
 
-func TestRuntimeFatalFromUnsatisfiedCompoundFileFailsInvocation(t *testing.T) {
+func TestNonRegularCompoundFileMemberRemainsPendingUntilRegular(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad")
 	other := filepath.Join(dir, "other")
+	if err := os.Mkdir(bad, 0o700); err != nil {
+		t.Fatalf("create initial non-regular path: %v", err)
+	}
 	input := eofReader{data: []byte("held")}
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
+	finished := make(chan struct{})
+	args := []string{"file:" + bad + " && file:" + other}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(bad); err == nil {
+			_ = os.WriteFile(bad, []byte("cleanup"), 0o600)
+		}
+		if err := os.RemoveAll(other); err == nil {
+			_ = os.WriteFile(other, []byte("cleanup"), 0o600)
+		}
+		select {
+		case <-finished:
+		case <-time.After(testTimeout):
+			t.Error("compound file invocation did not finish during cleanup")
+		}
+	})
 	go func() {
-		status <- run([]string{"file:" + bad + " && file:" + other}, input, output, &diagnostics)
+		status <- run(args, input, output, &diagnostics)
+		close(finished)
 	}()
 	select {
+	case got := <-status:
+		t.Fatalf("compound file invocation completed before its members were regular: %d", got)
 	case <-output.writeTimes:
-		t.Fatal("compound file condition released before runtime fatal")
+		t.Fatal("compound file condition released with a non-regular member")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if err := os.Mkdir(bad, 0o700); err != nil {
-		t.Fatalf("create fatal directory: %v", err)
+	if err := os.Remove(bad); err != nil {
+		t.Fatalf("remove non-regular member: %v", err)
+	}
+	if err := os.WriteFile(bad, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("create regular member: %v", err)
 	}
 	select {
 	case got := <-status:
-		if got == 0 {
-			t.Fatalf("runtime fatal unexpectedly succeeded, diagnostics = %q", diagnostics.String())
+		t.Fatalf("compound file invocation completed with one AND member missing: %d", got)
+	case <-output.writeTimes:
+		t.Fatal("compound file condition released with one AND member missing")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := os.WriteFile(other, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("create second regular member: %v", err)
+	}
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Fatalf("compound file status = %d, diagnostics = %q", got, diagnostics.String())
 		}
 	case <-time.After(testTimeout):
-		t.Fatal("runtime fatal did not terminate invocation")
+		t.Fatal("compound file condition did not release after both members became regular")
 	}
-	if output.Len() != 0 {
-		t.Fatalf("runtime fatal wrote held data: %q", output.String())
+	if got, want := output.String(), "held"; got != want {
+		t.Fatalf("compound file output = %q, want %q", got, want)
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("unexpected diagnostics: %q", diagnostics.String())
 	}
 }
 
@@ -456,8 +506,7 @@ func TestMixedConditionKindsLatchAcrossANDGroup(t *testing.T) {
 	}
 }
 
-func TestInitialFatalWinsPendingTimedSignalAndReadyFile(t *testing.T) {
-	fatal := errors.New("initial release probe failed")
+func TestInitialProbeErrorDoesNotOverrideSatisfiedOtherGroup(t *testing.T) {
 	deadline := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	coordinator := newReleaseCoordinatorWithGroups(true, []releaseGroup{
 		{members: []releaseCondition{
@@ -481,21 +530,21 @@ func TestInitialFatalWinsPendingTimedSignalAndReadyFile(t *testing.T) {
 			}
 			return true, nil
 		}
-		return false, fatal
+		return false, errors.New("transient initial probe failure")
 	}, time.Millisecond)
 	if monitor == nil {
 		t.Fatal("newFileMonitorWithProbe returned nil monitor")
 	}
 	t.Cleanup(monitor.Close)
-	if !errors.Is(err, fatal) {
-		t.Fatalf("initial error = %v, want %v", err, fatal)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
 	}
-	if got := coordinator.fatalError(); !errors.Is(got, fatal) {
-		t.Fatalf("coordinator fatal = %v, want %v", got, fatal)
+	if got := coordinator.fatalError(); got != nil {
+		t.Fatalf("initial probe error became fatal: %v", got)
 	}
 	select {
 	case <-coordinator.release:
-		t.Fatal("pending timed/signal/file events opened gate despite initial fatal")
-	default:
+	case <-time.After(testTimeout):
+		t.Fatal("satisfied alternative group did not open the gate")
 	}
 }

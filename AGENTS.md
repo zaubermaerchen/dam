@@ -14,8 +14,8 @@
 - 1つの argument 内で exact な ` && ` で連結した条件は AND group です。シェルに `&&` を解釈させないよう group 全体を quote します。group member は成立時に latch するため、成立順序に依存せず、file が成立後に削除されても gate は閉じません。
 - `--version` は単独指定時に `dam <version>\n` を stdout へ出力して終了し、開発時の既定値は `dev` とします。リリースビルドでは `main.version` をリンク時に差し替えます。余分な引数付きの `--version` はエラーです。
 - raw argument が完全一致する `-h` または `--help` は引数位置を問わず最優先で、複数指定でも help を一度だけ stdout へ出力して正常終了します。help 出力は末尾改行付きで、stdin を読まず、release monitor/readiness を開始しません。非完全一致の help 形式は通常の引数エラーです。help と `--version` や未知引数が併記された場合も help が優先され、引数エラー時に全文 help は自動出力しません。
-- file 条件は全対応環境で `os.Stat` 相当の probe を使い symlink をたどります。regular file は成立、存在しない path と dangling symlink は未成立として待機します。directory、FIFO、device、symlink loop、権限エラー、その他の stat error は、ゲートが CLOSED の間だけ fatal とします。同一 path の反復指定は受理しますが、実体 path や大文字小文字による重複排除は行いません。polling 間隔と厳密な検知遅延は公開契約にしません。
-- stdin を読む前に全 file 条件の初回 probe を完了します。初回結果に一つでも fatal があれば、別の file が regular、`0s`、または入力前に届いた signal が pending でも fatal を優先します。CLOSED 中は coordinator が OPEN を確定する前に報告を受理した fatal を、同じ判定時点で pending の release event より優先します。filesystem 上の変化時刻や probe 開始時刻の厳密な先後は保証しません。
+- file 条件は全対応環境で `os.Stat` 相当の probe を使い symlink をたどります。regular file は成立、存在しない path と dangling symlink は未成立として待機します。directory、FIFO、device、symlink loop、権限エラー、その他の stat error も未成立として診断なしで retry します。同一 path の反復指定は受理しますが、実体 path や大文字小文字による重複排除は行いません。polling 間隔と厳密な検知遅延は公開契約にしません。
+- stdin を読む前に全 file 条件の初回 probe を完了します。初回の stat error や non-regular 結果は pending として扱い、別の file が regular、`0s`、または入力前に届いた signal の release を妨げません。CLOSED 中も次回 probe で retry します。filesystem 上の変化時刻や probe 開始時刻の厳密な先後は保証しません。
 - EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。空 stdin の EOF は release condition を待たず正常終了し、file monitor を停止します。データ受信後の EOF は duration、datetime、signal、または file による解放までデータを保持します。
 - duration、datetime、設定済み signal、file 条件は OR で、一度開いたゲートは再び閉じません。OPEN を確定したら全 file monitor と time monitor を停止し、進行中の probe の完了を待たず、その後に届いた結果を無視します。OPEN 後、最初の stdout write より前でもゲートは OPEN とみなします。
 - 設定済みの SIGUSR1 / SIGUSR2 は最初の入力前から監視し、解放後もプロセス終了まで捕捉・無視します。duration、`0s`、datetime、または file が先に解放した場合も後続 signal でプロセスを終了させません。未設定のUSR signalは捕捉しません。Windows その他の未対応環境では signal を含まない duration / datetime / file の構成（組合せ含む）を受理しますが、signal 設定を含む構成は明示的な引数エラーとして拒否します。
@@ -31,7 +31,7 @@
 - `cmd/dam/release_signal_unix.go`: Unix の SIGUSR1 / SIGUSR2 監視と、解放後も signal を捕捉し続けるライフサイクルを担当します。
 - `cmd/dam/release_signal_windows.go` / `cmd/dam/release_signal_unsupported.go`: file-only / duration / datetime / help / version のビルドを維持しつつ、未対応環境で signal を含む設定を拒否します。
 - `cmd/dam/main_test.go`: 時刻、EOF、バイナリ保持、バックプレッシャー、解放後転送、引数、I/O エラーの契約を固定します。
-- `cmd/dam/release_file_test.go`: cross-platform な file parser / probe / polling、fatal error の優先順位、OPEN / 空 stdin EOF での monitor 停止を固定します。
+- `cmd/dam/release_file_test.go`: cross-platform な file parser / probe / polling、stat error と non-regular の retry、OPEN / 空 stdin EOF での monitor 停止を固定します。
 - `cmd/dam/main_signal_unix_test.go`: プロセス分離した実 SIGUSR1 / SIGUSR2 配線と、解放後 signal の無害化を固定します。
 - `cmd/dam/main_signal_windows_test.go`: Windows で file-only を許可し、signal を含む設定を拒否する契約を固定します。
 - `.github/workflows/ci.yml`: Ubuntu、macOS、Windows で test/vet を実行し、Ubuntu で race test を実行します。

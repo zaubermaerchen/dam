@@ -648,7 +648,7 @@ func parseSignalSource(value, source string) (string, error) {
 }
 
 func invalidReleaseCondition(value string) error {
-	return fmt.Errorf("invalid release condition %q: want duration:DURATION, datetime:YYYY-MM-DDTHH:MM[:SS], signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2, or file:PATH", value)
+	return fmt.Errorf("invalid release condition %q: want duration:DURATION, datetime:YYYY-MM-DDTHH:MM[:SS], datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM], signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2, or file:PATH", value)
 }
 
 func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}) error {

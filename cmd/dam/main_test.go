@@ -1522,6 +1522,20 @@ func TestParseConfigRejectsInvalidReleaseConditions(t *testing.T) {
 	}
 }
 
+func TestRunReportsSupportedDatetimeSyntaxInInvalidConditionDiagnostic(t *testing.T) {
+	var output, diagnostics bytes.Buffer
+	if status := run([]string{"term:TERM"}, strings.NewReader("input"), &output, &diagnostics); status == 0 {
+		t.Fatal("invalid condition unexpectedly succeeded")
+	}
+	const want = "invalid release condition \"term:TERM\": want duration:DURATION, datetime:YYYY-MM-DDTHH:MM[:SS], datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM], signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2, or file:PATH\n"
+	if got := diagnostics.String(); got != want {
+		t.Fatalf("diagnostic = %q, want %q", got, want)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("invalid condition wrote stdout: %q", output.String())
+	}
+}
+
 func TestForwardReleasesOnInjectedEventBeforeFirstInput(t *testing.T) {
 	input := &firstReadGate{
 		data:    []byte("event-opened"),

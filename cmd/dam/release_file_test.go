@@ -97,10 +97,10 @@ func TestFileProbeClassifiesMissingAndRegularFiles(t *testing.T) {
 	}
 }
 
-func TestFileProbeRejectsNonRegularFiles(t *testing.T) {
-	_, err := probeFileRelease(t.TempDir())
-	if err == nil {
-		t.Fatal("directory unexpectedly accepted as a release file")
+func TestFileProbeTreatsNonRegularFilesAsPending(t *testing.T) {
+	ready, err := probeFileRelease(t.TempDir())
+	if err != nil || ready {
+		t.Fatalf("directory probe = (%t, %v), want (false, nil)", ready, err)
 	}
 }
 
@@ -138,7 +138,87 @@ func TestFileProbeTreatsDanglingSymlinkAsPending(t *testing.T) {
 	}
 }
 
-func TestFileProbeRejectsSymlinkLoop(t *testing.T) {
+func TestFileProbeTreatsStatErrorsAndNonRegularFilesAsPending(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "parent")
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "directory", path: dir},
+		{name: "not a directory", path: filepath.Join(parent, "ready")},
+	}
+	if os.PathSeparator != '\\' {
+		first := filepath.Join(dir, "first")
+		second := filepath.Join(dir, "second")
+		if err := os.Symlink(second, first); err != nil {
+			t.Skipf("create symlink: %v", err)
+		}
+		if err := os.Symlink(first, second); err != nil {
+			t.Skipf("create symlink: %v", err)
+		}
+		tests = append(tests, struct {
+			name string
+			path string
+		}{name: "symlink loop", path: first})
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ready, err := probeFileRelease(test.path)
+			if ready {
+				t.Fatal("non-regular or error result unexpectedly reported ready")
+			}
+			if err != nil {
+				t.Fatalf("probe error = %v, want pending result without error", err)
+			}
+		})
+	}
+}
+
+func TestFileMonitorRetriesProbeErrors(t *testing.T) {
+	coordinator := newReleaseCoordinator(true)
+	t.Cleanup(coordinator.stopFiles)
+
+	var mu sync.Mutex
+	calls := 0
+	probe := func(string) (bool, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 {
+			return false, errors.New("transient stat failure")
+		}
+		return true, nil
+	}
+	monitor, err := newFileMonitorWithProbe([]string{"ready"}, coordinator, probe, time.Millisecond)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
+	}
+	defer monitor.Close()
+
+	select {
+	case <-coordinator.release:
+	case <-time.After(testTimeout):
+		t.Fatal("file monitor did not retry a failed probe")
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls < 2 {
+		t.Fatalf("probe calls = %d, want at least 2", gotCalls)
+	}
+	if err := coordinator.fatalError(); err != nil {
+		t.Fatalf("fatalError = %v, want nil", err)
+	}
+}
+
+func TestFileProbeTreatsSymlinkLoopAsPending(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("symlink permissions are platform dependent on Windows")
 	}
@@ -152,26 +232,22 @@ func TestFileProbeRejectsSymlinkLoop(t *testing.T) {
 		t.Skipf("create symlink: %v", err)
 	}
 	ready, err := probeFileRelease(first)
-	if err == nil || ready {
-		t.Fatalf("probe symlink loop = (%t, %v), want (false, error)", ready, err)
+	if err != nil || ready {
+		t.Fatalf("probe symlink loop = (%t, %v), want (false, nil)", ready, err)
 	}
 }
 
-func TestFileOnlyInitialFatalPrecedesImmediateRelease(t *testing.T) {
-	input := &trackingReader{}
+func TestFileOnlyInitialNonRegularDoesNotOverrideImmediateRelease(t *testing.T) {
 	var output, diagnostics bytes.Buffer
-	status := run([]string{"duration:0s", "--or=file:" + t.TempDir()}, input, &output, &diagnostics)
-	if status == 0 {
-		t.Fatal("directory release condition unexpectedly succeeded")
+	status := run([]string{"duration:0s", "--or=file:" + t.TempDir()}, strings.NewReader("input"), &output, &diagnostics)
+	if status != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
 	}
-	if output.Len() != 0 {
-		t.Fatalf("fatal initial probe wrote stdout: %q", output.String())
+	if got, want := output.String(), "input"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if diagnostics.Len() == 0 {
-		t.Fatal("fatal initial probe produced no diagnostics")
-	}
-	if input.reads != 0 {
-		t.Fatalf("fatal initial probe read stdin %d times", input.reads)
+	if diagnostics.Len() != 0 {
+		t.Fatalf("unexpected diagnostics: %q", diagnostics.String())
 	}
 }
 
@@ -221,34 +297,54 @@ func TestFileReleaseHoldsDataUntilFileAppears(t *testing.T) {
 	}
 }
 
-func TestFileReleaseFatalWhileClosedSuppressesHeldData(t *testing.T) {
+func TestFileReleaseRetriesNonRegularTransition(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ready")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	input := eofReader{data: []byte("must not escape")}
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
 	var diagnostics bytes.Buffer
 	status := make(chan int, 1)
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		if err := os.RemoveAll(path); err == nil {
+			_ = os.WriteFile(path, []byte("cleanup"), 0o600)
+		}
+		select {
+		case <-finished:
+		case <-time.After(testTimeout):
+		}
+	})
 	go func() {
 		status <- run([]string{"file:" + path}, input, output, &diagnostics)
+		close(finished)
 	}()
 	select {
 	case <-output.writeTimes:
 		t.Fatal("file condition unexpectedly released data")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove non-regular release path: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("create regular release path: %v", err)
 	}
 	select {
 	case got := <-status:
-		if got == 0 {
-			t.Fatal("fatal file transition unexpectedly succeeded")
+		if got != 0 {
+			t.Fatalf("file transition status = %d, diagnostics = %q", got, diagnostics.String())
 		}
 	case <-time.After(testTimeout):
-		t.Fatal("fatal file transition did not terminate run")
+		t.Fatal("file transition did not release held data")
 	}
-	if output.Len() != 0 {
-		t.Fatalf("fatal file transition wrote stdout: %q", output.String())
+	if got, want := output.String(), "must not escape"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("unexpected diagnostics: %q", diagnostics.String())
 	}
 }
 
@@ -820,9 +916,8 @@ func TestReleaseCoordinatorPreventsProbeReservationAfterStop(t *testing.T) {
 	}
 }
 
-func TestInitialRegularAndFatalProbeFatalWins(t *testing.T) {
+func TestInitialRegularAndProbeErrorRemainsPending(t *testing.T) {
 	coordinator := newReleaseCoordinator(true)
-	fatal := errors.New("initial fatal")
 	var mu sync.Mutex
 	probed := make(map[string]int)
 	probe := func(path string) (bool, error) {
@@ -832,49 +927,48 @@ func TestInitialRegularAndFatalProbeFatalWins(t *testing.T) {
 		if path == "regular" {
 			return true, nil
 		}
-		return false, fatal
+		return false, errors.New("transient initial probe failure")
 	}
-	monitor, err := newFileMonitorWithProbe([]string{"regular", "fatal"}, coordinator, probe, time.Millisecond)
-	if err == nil || !errors.Is(err, fatal) {
-		t.Fatalf("newFileMonitorWithProbe error = %v, want %v", err, fatal)
+	monitor, err := newFileMonitorWithProbe([]string{"regular", "error"}, coordinator, probe, time.Millisecond)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
 	}
 	if monitor == nil {
 		t.Fatal("newFileMonitorWithProbe returned nil monitor")
 	}
 	select {
 	case <-coordinator.release:
-		t.Fatal("regular initial result opened gate despite fatal result")
 	default:
+		t.Fatal("regular initial result did not open gate despite pending probe error")
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, path := range []string{"regular", "fatal"} {
+	for _, path := range []string{"regular", "error"} {
 		if got := probed[path]; got != 1 {
 			t.Fatalf("probe count for %q = %d, want 1", path, got)
 		}
 	}
 }
 
-func TestInitialPendingOpenAndFatalProbeFatalWins(t *testing.T) {
+func TestInitialPendingOpenAndProbeErrorDoesNotBlockOpen(t *testing.T) {
 	coordinator := newReleaseCoordinator(true)
-	fatal := errors.New("fatal after pending signal")
 	probe := func(string) (bool, error) {
 		if err := coordinator.requestOpen(); err != nil {
 			return false, err
 		}
-		return false, fatal
+		return false, errors.New("transient initial probe failure")
 	}
-	monitor, err := newFileMonitorWithProbe([]string{"fatal"}, coordinator, probe, time.Millisecond)
-	if err == nil || !errors.Is(err, fatal) {
-		t.Fatalf("newFileMonitorWithProbe error = %v, want %v", err, fatal)
+	monitor, err := newFileMonitorWithProbe([]string{"error"}, coordinator, probe, time.Millisecond)
+	if err != nil {
+		t.Fatalf("newFileMonitorWithProbe returned error: %v", err)
 	}
 	if monitor == nil {
 		t.Fatal("newFileMonitorWithProbe returned nil monitor")
 	}
 	select {
 	case <-coordinator.release:
-		t.Fatal("pending open opened gate despite fatal initial probe")
 	default:
+		t.Fatal("pending open did not open gate after retryable initial probe")
 	}
 }
 
@@ -930,19 +1024,16 @@ func TestInitialRegularFileOpensBeforeFirstStdinRead(t *testing.T) {
 	}
 }
 
-func TestCollectInitialFileProbeResultsUsesConfiguredPathOrder(t *testing.T) {
-	firstFatal := errors.New("first fatal")
-	secondFatal := errors.New("second fatal")
+func TestCollectInitialFileProbeResultsIgnoresProbeErrors(t *testing.T) {
+	firstError := errors.New("first probe error")
+	secondError := errors.New("second probe error")
 	results := make(chan fileProbeResult, 2)
-	results <- fileProbeResult{index: 1, err: secondFatal}
-	results <- fileProbeResult{index: 0, err: firstFatal}
+	results <- fileProbeResult{index: 1, err: secondError}
+	results <- fileProbeResult{index: 0, err: firstError}
 
 	first, anyReady := collectInitialFileProbeResults(results, 2)
-	if !errors.Is(first, firstFatal) {
-		t.Fatalf("initial fatal = %v, want configured-first error %v", first, firstFatal)
-	}
-	if errors.Is(first, secondFatal) {
-		t.Fatalf("initial fatal = %v, selected later configured path", first)
+	if first != nil {
+		t.Fatalf("initial error = %v, want nil for retryable probe errors", first)
 	}
 	if anyReady {
 		t.Fatal("initial results reported a ready file without a ready result")
@@ -1035,7 +1126,7 @@ func TestForwardDelayedReportsClosedFailureChannel(t *testing.T) {
 	}
 }
 
-func TestInFlightFileFatalIsIgnoredAfterTimedOpen(t *testing.T) {
+func TestInFlightFileProbeErrorIsIgnoredAfterTimedOpen(t *testing.T) {
 	coordinator := newReleaseCoordinatorWithGroups(false, []releaseGroup{
 		{members: []releaseCondition{newDurationReleaseCondition(time.Second)}},
 	})
@@ -1088,72 +1179,61 @@ func TestInFlightFileFatalIsIgnoredAfterTimedOpen(t *testing.T) {
 	}
 }
 
-func TestTimedAndFileFatalOpenBoundaryHasConsistentOutcome(t *testing.T) {
-	for attempt := 0; attempt < 100; attempt++ {
-		coordinator := newReleaseCoordinatorWithGroups(false, []releaseGroup{
-			{members: []releaseCondition{newDurationReleaseCondition(time.Second)}},
-			{members: []releaseCondition{{kind: "file", source: "late"}}},
-		})
-		probeStarted := make(chan struct{})
-		allowProbe := make(chan struct{})
-		var unblockProbeOnce sync.Once
-		unblockProbe := func() {
-			unblockProbeOnce.Do(func() { close(allowProbe) })
-		}
-		t.Cleanup(unblockProbe)
-		monitor := &fileMonitor{
-			coordinator: coordinator,
-			interval:    time.Millisecond,
-			wait: func(string, <-chan struct{}, time.Duration) bool {
+func TestTimedAndFileProbeErrorOpenBoundaryHasNoFatal(t *testing.T) {
+	coordinator := newReleaseCoordinatorWithGroups(false, []releaseGroup{
+		{members: []releaseCondition{newDurationReleaseCondition(time.Second)}},
+		{members: []releaseCondition{{kind: "file", source: "late"}}},
+	})
+	t.Cleanup(coordinator.stopFiles)
+	probeStarted := make(chan struct{})
+	allowProbe := make(chan struct{})
+	var unblockProbeOnce sync.Once
+	unblockProbe := func() {
+		unblockProbeOnce.Do(func() { close(allowProbe) })
+	}
+	t.Cleanup(unblockProbe)
+	monitor := &fileMonitor{
+		coordinator: coordinator,
+		interval:    time.Millisecond,
+		wait: func(_ string, stop <-chan struct{}, _ time.Duration) bool {
+			select {
+			case <-stop:
+				return false
+			default:
 				return true
-			},
-			probe: func(string) (bool, error) {
-				close(probeStarted)
-				<-allowProbe
-				return false, errors.New("barrier file probe failure")
-			},
-		}
-		watchDone := make(chan struct{})
-		go func() {
-			monitor.watchPath("late")
-			close(watchDone)
-		}()
-		select {
-		case <-probeStarted:
-		case <-time.After(testTimeout):
-			coordinator.stopFiles()
-			t.Fatalf("attempt %d: file probe did not reach the barrier", attempt)
-		}
+			}
+		},
+		probe: func(string) (bool, error) {
+			close(probeStarted)
+			<-allowProbe
+			return false, errors.New("transient file probe failure")
+		},
+	}
+	watchDone := make(chan struct{})
+	go func() {
+		monitor.watchPath("late")
+		close(watchDone)
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(testTimeout):
+		t.Fatal("file probe did not reach the open boundary")
+	}
 
-		start := make(chan struct{})
-		timedDone := make(chan error, 1)
-		go func() {
-			<-start
-			timedDone <- coordinator.satisfyDuration(time.Second)
-		}()
-		go func() {
-			<-start
-			unblockProbe()
-		}()
-		close(start)
-
-		if err := <-timedDone; err != nil && !errors.Is(err, coordinator.fatalError()) {
-			t.Fatalf("attempt %d: timed event error = %v, fatal = %v", attempt, err, coordinator.fatalError())
-		}
-		select {
-		case <-watchDone:
-		case <-time.After(testTimeout):
-			coordinator.stopFiles()
-			t.Fatalf("attempt %d: file watcher did not finish", attempt)
-		}
-
-		opened := releaseChannelReady(coordinator.release)
-		fatal := coordinator.fatalError()
-		if opened == (fatal != nil) {
-			coordinator.stopFiles()
-			t.Fatalf("attempt %d: inconsistent OPEN/fatal state: opened=%t fatal=%v", attempt, opened, fatal)
-		}
-		coordinator.stopFiles()
+	unblockProbe()
+	if err := coordinator.satisfyDuration(time.Second); err != nil {
+		t.Fatalf("timed event error = %v", err)
+	}
+	select {
+	case <-watchDone:
+	case <-time.After(testTimeout):
+		t.Fatal("file watcher did not finish after coordinator opened")
+	}
+	if !releaseChannelReady(coordinator.release) {
+		t.Fatal("timed condition did not open coordinator")
+	}
+	if got := coordinator.fatalError(); got != nil {
+		t.Fatalf("transient file probe error became fatal: %v", got)
 	}
 }
 

@@ -1031,30 +1031,27 @@ func TestRunPastAbsoluteDeadlineReleasesImmediately(t *testing.T) {
 	}
 }
 
-func TestRunPastAbsoluteDeadlineDoesNotOverrideInitialFileFatal(t *testing.T) {
+func TestRunPastAbsoluteDeadlineReleasesDespiteInitialNonRegularFile(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
 	clock := runtimeClock{
 		now:      func() time.Time { return now },
 		location: time.UTC,
 	}
-	input := &trackingReader{}
+	input := strings.NewReader("past")
 	var output, diagnostics bytes.Buffer
 	status := runWithClock([]string{
 		"datetime:2026-01-02T03:03:00",
 		"--or",
 		"file:" + t.TempDir(),
 	}, input, &output, &diagnostics, clock)
-	if status == 0 {
-		t.Fatal("directory release condition unexpectedly succeeded")
+	if status != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
 	}
-	if output.Len() != 0 {
-		t.Fatalf("fatal initial probe wrote stdout: %q", output.String())
+	if got, want := output.String(), "past"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if diagnostics.Len() == 0 {
-		t.Fatal("fatal initial probe produced no diagnostics")
-	}
-	if input.reads != 0 {
-		t.Fatalf("fatal initial probe read stdin %d times", input.reads)
+	if diagnostics.Len() != 0 {
+		t.Fatalf("unexpected diagnostics: %q", diagnostics.String())
 	}
 }
 
@@ -1075,9 +1072,9 @@ func TestRunArmsAbsoluteDeadlineBeforeInitialFileProbe(t *testing.T) {
 		"datetime:" + now.Add(time.Minute).Format("2006-01-02T15:04:05"),
 		"--or",
 		"file:" + t.TempDir(),
-	}, &trackingReader{}, &output, &diagnostics, clock)
-	if status == 0 {
-		t.Fatal("directory release condition unexpectedly succeeded")
+	}, strings.NewReader(""), &output, &diagnostics, clock)
+	if status != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
 	}
 	if !timerCreated {
 		t.Fatal("absolute deadline was not armed before initial file probe")
@@ -1085,7 +1082,7 @@ func TestRunArmsAbsoluteDeadlineBeforeInitialFileProbe(t *testing.T) {
 	select {
 	case <-timerStopped:
 	case <-time.After(testTimeout):
-		t.Fatal("absolute deadline timer was not stopped on initial probe failure")
+		t.Fatal("absolute deadline timer was not stopped after empty input")
 	}
 }
 

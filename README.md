@@ -184,24 +184,21 @@ monitoring contract.
   checks every configured path once. A path that does not exist, including a
   dangling symlink, remains pending. Symlinks are followed; a path releases the
   gate only when its target is a regular file. A directory, FIFO, device,
-  symlink loop, permission failure, or other file-status error is fatal while
-  the gate is closed.
+  symlink loop, permission failure, or other file-status error remains pending
+  and is retried while the gate is closed.
 - The positional conditions and each `--or` group are combined with OR: the
   first satisfied release group opens the gate. Conditions within one argument
   joined by ` && ` are ANDed. No stream data is written to stdout before a
   release occurs.
-- All initial file checks finish before the first open decision. A fatal result
-  from any initial check takes precedence over an existing regular file, `0s`,
-  a current or past datetime, or a pending signal. While the gate
-  remains closed, a fatal file result that has already been reported to the
-  release coordinator also takes precedence over release events pending at the
-  same decision point.
+- All initial file checks finish before the first open decision. Pending
+  results, including stat errors and non-regular paths, do not produce
+  diagnostics or override another release condition; they are retried while
+  the gate remains closed.
 - Startup validates all members before normal stream processing: syntax first,
   then platform capabilities, then every initial file probe. The initial file
-  probe barrier covers every OR group; an initial fatal is reported in
-  configuration order even if another group is already satisfiable. A signal
-  received while that barrier is running is latched for its group but cannot
-  override an initial fatal.
+  probe barrier covers every OR group. A signal received while that barrier is
+  running is latched for its group, and pending file probes continue in the
+  background after startup.
 - EOF does not open the gate early. Data received before EOF is still held until
   a duration, datetime, signal, or file release. After the initial
   file checks succeed, empty stdin exits successfully without waiting for a

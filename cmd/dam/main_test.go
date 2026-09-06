@@ -39,6 +39,9 @@ Arguments:
           datetime:YYYY-MM-DDTHH:MM[:SS]
               An absolute local datetime monitored from startup. Multiple
               datetime conditions are allowed.
+          datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
+              RFC3339 form; explicit timezones require seconds. Fractional
+              seconds and named timezones are invalid.
           signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2
               Release on the configured Unix signal. Alias spellings are
               equivalent on supported Unix targets.
@@ -93,6 +96,9 @@ func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
 		"latched",
 		"multiple distinct durations",
 		"Multiple distinct\ndatetime conditions",
+		"datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]",
+		"strict RFC 3339",
+		"explicit UTC timezone",
 		"Equivalent duration values",
 		"equivalent datetime values",
 		"monitoring stop",
@@ -723,6 +729,43 @@ func TestParseConfigAcceptsAbsoluteDeadlineWithSeconds(t *testing.T) {
 	}
 }
 
+func TestParseAbsoluteDeadlineAcceptsExplicitRFC3339Timezones(t *testing.T) {
+	location := time.FixedZone("caller", -5*60*60)
+	for _, tc := range []struct {
+		value      string
+		want       time.Time
+		wantOffset int
+	}{
+		{value: "2026-09-06T00:00:00Z", want: time.Date(2026, time.September, 6, 0, 0, 0, 0, time.UTC), wantOffset: 0},
+		{value: "2026-09-06T09:00:00+09:00", want: time.Date(2026, time.September, 6, 9, 0, 0, 0, time.FixedZone("+09:00", 9*60*60)), wantOffset: 9 * 60 * 60},
+		{value: "2026-09-06T09:00:00-04:30", want: time.Date(2026, time.September, 6, 9, 0, 0, 0, time.FixedZone("-04:30", -4*60*60-30*60)), wantOffset: -4*60*60 - 30*60},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := parseAbsoluteDeadline(tc.value, location)
+			if err != nil {
+				t.Fatalf("parseAbsoluteDeadline returned error: %v", err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("deadline = %s (%s), want %s (%s)", got, got.UTC(), tc.want, tc.want.UTC())
+			}
+			if _, offset := got.Zone(); offset != tc.wantOffset {
+				t.Fatalf("timezone offset = %d, want %d", offset, tc.wantOffset)
+			}
+		})
+	}
+}
+
+func TestParseAbsoluteDeadlineRejectsMalformedNumericOffsetWithASCIIHint(t *testing.T) {
+	_, err := parseAbsoluteDeadline("2026-09-03T18:00:00+09:0X", time.UTC)
+	if err == nil {
+		t.Fatal("parseAbsoluteDeadline unexpectedly accepted malformed numeric offset")
+	}
+	const want = "datetime timezone offset must use +HH:MM or -HH:MM"
+	if got := err.Error(); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfigAcceptsAbsoluteDeadlineYearBoundaries(t *testing.T) {
 	for _, value := range []string{"0001-01-01T00:00", "9999-12-31T23:59:59"} {
 		t.Run(value, func(t *testing.T) {
@@ -749,6 +792,17 @@ func TestParseConfigRejectsMalformedAbsoluteDeadlines(t *testing.T) {
 		"2026-12-31T23:59.1",
 		"2026-12-31T23:59Z",
 		"2026-12-31T23:59+09:00",
+		"2026-12-31T23:59:00.1Z",
+		"2026-12-31T23:59:00.123+09:00",
+		"2026-12-31T23:59:00z",
+		"2026-12-31T23:59:00+09",
+		"2026-12-31T23:59:00+0900",
+		"2026-12-31T23:59:00+24:00",
+		"2026-12-31T23:59:00+09:60",
+		"2026-12-31T23:59:00UTC",
+		"2026-12-31T23:59:00Asia/Tokyo",
+		"0000-01-01T00:00:00Z",
+		"2026-12-31T23:59UTC",
 	} {
 		t.Run(value, func(t *testing.T) {
 			if _, err := parseConfigAt([]string{"datetime:" + value}, time.UTC); err == nil {

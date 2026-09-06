@@ -37,6 +37,9 @@ Arguments:
           datetime:YYYY-MM-DDTHH:MM[:SS]
               An absolute local datetime monitored from startup. Multiple
               datetime conditions are allowed.
+          datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
+              RFC3339 form; explicit timezones require seconds. Fractional
+              seconds and named timezones are invalid.
           signal:USR1, signal:SIGUSR1, signal:USR2, signal:SIGUSR2
               Release on the configured Unix signal. Alias spellings are
               equivalent on supported Unix targets.
@@ -319,6 +322,27 @@ func normalizeLocation(location *time.Location) *time.Location {
 
 func parseAbsoluteDeadline(value string, location *time.Location) (time.Time, error) {
 	location = normalizeLocation(location)
+	if (len(value) == 20 && value[19] == 'Z') ||
+		(len(value) == 25 && (value[19] == '+' || value[19] == '-')) {
+		if len(value) == 25 {
+			// time.Parse normalizes some out-of-range offset minutes, so
+			// validate the textual RFC3339 offset before parsing it.
+			if !allASCIIDigits(value[20:22]) || value[22] != ':' || !allASCIIDigits(value[23:25]) {
+				return time.Time{}, fmt.Errorf("datetime timezone offset must use +HH:MM or -HH:MM")
+			}
+			if parseASCIIDigits(value[20:22]) > 23 || parseASCIIDigits(value[23:25]) > 59 {
+				return time.Time{}, fmt.Errorf("datetime timezone offset is out of range")
+			}
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("datetime must use RFC3339 with seconds and timezone: %w", err)
+		}
+		if parsed.Year() < 1 || parsed.Year() > 9999 {
+			return time.Time{}, fmt.Errorf("datetime year must be between 0001 and 9999")
+		}
+		return parsed, nil
+	}
 	if len(value) != len("2006-01-02T15:04") && len(value) != len("2006-01-02T15:04:05") {
 		return time.Time{}, fmt.Errorf("absolute deadline must use YYYY-MM-DDTHH:MM[:SS]")
 	}

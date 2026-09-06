@@ -58,6 +58,7 @@ Every release condition is a prefixed positional `CONDITION`:
 ```text
 duration:DURATION
 datetime:YYYY-MM-DDTHH:MM[:SS]
+datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
 signal:USR1
 signal:SIGUSR1
 signal:USR2
@@ -73,10 +74,16 @@ are allowed.
 
 `datetime:YYYY-MM-DDTHH:MM[:SS]` is an absolute local datetime monitored from
 startup. Seconds default to `00` when omitted. Years must be between `0001` and
-`9999`; invalid calendar dates, timezone suffixes, fractional seconds, and
-non-existent local times during a daylight-saving transition are rejected. If a
-local time occurs twice, the earlier instant is selected. Multiple distinct
+`9999`; invalid calendar dates, fractional seconds, and non-existent local times
+during a daylight-saving transition are rejected. If a local time occurs twice,
+the earlier instant is selected. Multiple distinct
 datetime conditions are allowed.
+
+`datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]` accepts a strict RFC 3339
+timestamp with an explicit UTC timezone (`Z`) or numeric offset. Explicit
+timezone forms require seconds and are independent of the process local
+timezone. Fractional seconds, lowercase `z`, named or IANA timezones, and
+malformed offsets are rejected.
 
 `signal:USR1` and `signal:SIGUSR1` are equivalent, as are `signal:USR2` and
 `signal:SIGUSR2`. Signal conditions are available on supported Unix targets.

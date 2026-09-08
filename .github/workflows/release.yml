@@ -95,6 +95,11 @@ jobs:
         goarch:
           - amd64
           - arm64
+        include:
+          - goos: linux
+            goarch: armv6
+            target_goarch: arm
+            target_goarm: "6"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,6 +113,8 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           TARGET_OS: ${{ matrix.goos }}
           TARGET_ARCH: ${{ matrix.goarch }}
+          TARGET_GOARCH: ${{ matrix.target_goarch || matrix.goarch }}
+          TARGET_GOARM: ${{ matrix.target_goarm }}
         run: |
           set -euo pipefail
           package_name="dam_${VERSION}_${TARGET_OS}_${TARGET_ARCH}"
@@ -120,7 +127,7 @@ jobs:
           if [[ "$TARGET_OS" == windows ]]; then
             binary+=.exe
           fi
-          CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
+          CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_GOARCH" GOARM="$TARGET_GOARM" \
             go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
               -o "$staging/$package_name/$binary" ./cmd/dam
           cp LICENSE README.md "$staging/$package_name/"
@@ -195,14 +202,15 @@ jobs:
           expected=(
             "dam_${VERSION}_linux_amd64.tar.gz"
             "dam_${VERSION}_linux_arm64.tar.gz"
+            "dam_${VERSION}_linux_armv6.tar.gz"
             "dam_${VERSION}_darwin_amd64.tar.gz"
             "dam_${VERSION}_darwin_arm64.tar.gz"
             "dam_${VERSION}_windows_amd64.zip"
             "dam_${VERSION}_windows_arm64.zip"
           )
           mapfile -t actual < <(find release -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
-          if (( ${#actual[@]} != 6 )); then
-            echo "expected six archives, found ${#actual[@]}" >&2
+          if (( ${#actual[@]} != 7 )); then
+            echo "expected seven archives, found ${#actual[@]}" >&2
             exit 1
           fi
           printf '%s\n' "${expected[@]}" | sort > expected.txt
@@ -228,6 +236,7 @@ jobs:
           archives=(
             "release/dam_${VERSION}_linux_amd64.tar.gz"
             "release/dam_${VERSION}_linux_arm64.tar.gz"
+            "release/dam_${VERSION}_linux_armv6.tar.gz"
             "release/dam_${VERSION}_darwin_amd64.tar.gz"
             "release/dam_${VERSION}_darwin_arm64.tar.gz"
             "release/dam_${VERSION}_windows_amd64.zip"

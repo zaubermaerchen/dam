@@ -32,16 +32,36 @@ func (fd *unixEventFD) Write(data []byte) (written int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := setEventFDFlags(fd.fd, originalFlags|syscall.O_NONBLOCK); err != nil {
-		_ = setEventFDFlags(fd.fd, originalFlags)
+	originalNonblock := originalFlags&syscall.O_NONBLOCK != 0
+	if err := setEventFDNonblock(fd.fd, true); err != nil {
+		_ = setEventFDNonblock(fd.fd, originalNonblock)
 		return 0, err
 	}
 	defer func() {
-		if restoreErr := setEventFDFlags(fd.fd, originalFlags); err == nil && restoreErr != nil {
+		if restoreErr := setEventFDNonblock(fd.fd, originalNonblock); err == nil && restoreErr != nil {
 			err = restoreErr
 		}
 	}()
 	return syscall.Write(fd.fd, data)
+}
+
+// setEventFDNonblock changes only the mode bit owned by this writer. In
+// particular, restoring the complete F_GETFL result would ask the kernel to
+// restore status bits such as Darwin's write marker that are not settable.
+func setEventFDNonblock(fd int, nonblocking bool) error {
+	flags, err := eventFDFlags(fd)
+	if err != nil {
+		return err
+	}
+	if (flags&syscall.O_NONBLOCK != 0) == nonblocking {
+		return nil
+	}
+	if nonblocking {
+		flags |= syscall.O_NONBLOCK
+	} else {
+		flags &^= syscall.O_NONBLOCK
+	}
+	return setEventFDFlags(fd, flags)
 }
 
 func (fd *unixEventFD) Close() error {

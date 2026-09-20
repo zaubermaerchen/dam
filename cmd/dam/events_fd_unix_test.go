@@ -16,27 +16,45 @@ import (
 )
 
 func TestRunEventFDRestoresOriginalUnixFlags(t *testing.T) {
-	eventsFile := openEventFile(t)
-	defer eventsFile.Close()
-	before, err := eventFDFlags(int(eventsFile.Fd()))
-	if err != nil {
-		t.Fatalf("read original event fd flags: %v", err)
-	}
-	var output, diagnostics bytes.Buffer
-	args := []string{"--events-fd", strconv.FormatUint(uint64(eventsFile.Fd()), 10), "duration:0s"}
-	status, cleanup := execute(args, strings.NewReader("payload"), &output, &diagnostics)
-	if status != 0 {
-		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
-	}
-	after, err := eventFDFlags(int(eventsFile.Fd()))
-	if err != nil {
-		t.Fatalf("read restored event fd flags: %v", err)
-	}
-	if after != before {
-		t.Fatalf("event fd flags after run = %#x, want original %#x", after, before)
-	}
-	if cleanup != nil {
-		cleanup()
+	for _, test := range []struct {
+		name        string
+		nonblocking bool
+	}{
+		{name: "blocking"},
+		{name: "nonblocking", nonblocking: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			eventsFile := openEventFile(t)
+			defer eventsFile.Close()
+			eventFDNumber := int(eventsFile.Fd())
+			if test.nonblocking {
+				if err := syscall.SetNonblock(eventFDNumber, true); err != nil {
+					t.Fatalf("make event fd nonblocking: %v", err)
+				}
+			}
+			before, err := eventFDFlags(eventFDNumber)
+			if err != nil {
+				t.Fatalf("read original event fd flags: %v", err)
+			}
+			var output, diagnostics bytes.Buffer
+			args := []string{"--events-fd", strconv.Itoa(eventFDNumber), "duration:0s"}
+			status, cleanup := execute(args, strings.NewReader("payload"), &output, &diagnostics)
+			if status != 0 {
+				t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
+			}
+			after, err := eventFDFlags(eventFDNumber)
+			if err != nil {
+				t.Fatalf("read restored event fd flags: %v", err)
+			}
+			// Darwin reports its kernel-owned FWASWRITTEN bit after the first write;
+			// only O_NONBLOCK is changed by the event transport and can be restored.
+			if after&syscall.O_NONBLOCK != before&syscall.O_NONBLOCK {
+				t.Fatalf("event fd blocking mode after run = %#x, want original %#x (full flags after %#x, before %#x)", after&syscall.O_NONBLOCK, before&syscall.O_NONBLOCK, after, before)
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+		})
 	}
 }
 
@@ -67,12 +85,10 @@ func TestRunFullEventPipeDisablesObservationAndContinuesData(t *testing.T) {
 		}
 		break
 	}
-	if err := setEventFDFlags(writeFD, originalFlags); err != nil {
-		t.Fatalf("restore event pipe flags before run: %v", err)
-	}
-
 	var output, diagnostics bytes.Buffer
-	args := []string{"--events-fd=" + strconv.FormatUint(uint64(writeEnd.Fd()), 10), "duration:0s"}
+	// Reuse the raw descriptor captured before SetNonblock: os.File.Fd resets
+	// Go's internally tracked pipe mode to blocking when called later.
+	args := []string{"--events-fd=" + strconv.Itoa(writeFD), "duration:0s"}
 	if status := run(args, strings.NewReader("payload"), &output, &diagnostics); status != 0 {
 		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
 	}
@@ -86,8 +102,11 @@ func TestRunFullEventPipeDisablesObservationAndContinuesData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read event pipe flags after failed event write: %v", err)
 	}
-	if afterFlags != originalFlags {
-		t.Fatalf("event pipe flags after failed event write = %#x, want %#x", afterFlags, originalFlags)
+	// A failed observation write may still leave Darwin's kernel-owned write
+	// marker set; the caller's pre-existing nonblocking mode must be unchanged.
+	wantFlags := originalFlags | syscall.O_NONBLOCK
+	if afterFlags&syscall.O_NONBLOCK != wantFlags&syscall.O_NONBLOCK {
+		t.Fatalf("event pipe blocking mode after failed event write = %#x, want %#x (full flags after %#x, before %#x)", afterFlags&syscall.O_NONBLOCK, wantFlags&syscall.O_NONBLOCK, afterFlags, originalFlags)
 	}
 	_ = writeEnd.Close()
 	if _, err := io.Copy(io.Discard, readEnd); err != nil {

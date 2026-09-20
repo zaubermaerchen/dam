@@ -102,6 +102,15 @@ invalid. The option may appear before, between, or after conditions and
 `--or` alternatives; when repeated, the last value wins. This option does not
 itself provide a release condition.
 
+`--events-fd N` and `--events-fd=N` enable newline-delimited JSON events on a
+dedicated file descriptor. A successful OPEN transition emits exactly two
+records, `release-selected` followed by `stream-open`, before the release
+becomes visible to the data path. This also applies to a startup-satisfied
+condition when stdin is still blocked or empty; an empty stdin that reaches
+EOF without a release emits neither record. Event transport setup or write
+failures print one `events disabled: ...` warning and do not interrupt the
+primary stream. The descriptor remains owned by the caller.
+
 ```bash
 printf 'hello' | ./dam duration:3s
 ```

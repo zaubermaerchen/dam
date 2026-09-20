@@ -61,6 +61,11 @@ Options:
         SIZE is a positive byte count or a binary K/k, M/m, or G/g value.
         Also accepted as --buffer-size=SIZE.
 
+  --events-fd N
+        Emit release-selected and stream-open JSONL events to file descriptor N.
+        Also accepted as --events-fd=N. Event transport failures disable events
+        with one warning while the primary stream continues.
+
 Notes:
         Equivalent duration values and resolved datetime values share one
         latched event. Time and file monitors stop after release or empty
@@ -180,10 +185,15 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
 	}
+	events := newEventSink(config.eventsFD, diagnostics)
 
 	coordinator := newReleaseCoordinatorWithGroups(true, config.releaseGroups())
+	if events != nil {
+		coordinator.setReleaseHook(events.emitOpen)
+	}
 	monitor, err := newReleaseMonitor(config.signals, coordinator)
 	if err != nil {
+		events.Close()
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
 	}
@@ -191,6 +201,7 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 	cleanup := func() {
 		timedMonitor.Close()
 		monitor.Close()
+		events.Close()
 	}
 	// Datetime conditions must be armed before the initial file probes. The
 	// coordinator remains initializing so a due datetime can only become a
@@ -241,6 +252,7 @@ type runConfig struct {
 	signals  []string
 	files    []string
 	groups   []releaseGroup
+	eventsFD *int
 
 	bufferSize        int
 	immediateDuration bool
@@ -278,6 +290,28 @@ func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 				return runConfig{}, err
 			}
 			config.bufferSize = bufferSize
+		case arg == "--events-fd":
+			if config.eventsFD != nil {
+				return runConfig{}, fmt.Errorf("--events-fd may only be specified once")
+			}
+			index++
+			if index == len(args) {
+				return runConfig{}, fmt.Errorf("missing value for --events-fd")
+			}
+			eventsFD, err := parseEventsFD(args[index])
+			if err != nil {
+				return runConfig{}, err
+			}
+			config.eventsFD = &eventsFD
+		case strings.HasPrefix(arg, "--events-fd="):
+			if config.eventsFD != nil {
+				return runConfig{}, fmt.Errorf("--events-fd may only be specified once")
+			}
+			eventsFD, err := parseEventsFD(strings.TrimPrefix(arg, "--events-fd="))
+			if err != nil {
+				return runConfig{}, err
+			}
+			config.eventsFD = &eventsFD
 		case arg == "--or":
 			if !hasCondition {
 				return runConfig{}, fmt.Errorf("--or requires a preceding condition")
@@ -325,6 +359,21 @@ func parseConfigAt(args []string, location *time.Location) (runConfig, error) {
 		return runConfig{}, fmt.Errorf("--or requires a condition")
 	}
 	return config, nil
+}
+
+func parseEventsFD(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("invalid --events-fd value %q", value)
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --events-fd value %q", value)
+	}
+	maxInt := uint64(^uint(0) >> 1)
+	if parsed < 3 || parsed > maxInt {
+		return 0, fmt.Errorf("invalid --events-fd value %q: want an integer >= 3", value)
+	}
+	return int(parsed), nil
 }
 
 func normalizeLocation(location *time.Location) *time.Location {

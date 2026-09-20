@@ -63,6 +63,11 @@ Options:
         SIZE is a positive byte count or a binary K/k, M/m, or G/g value.
         Also accepted as --buffer-size=SIZE.
 
+  --events-fd N
+        Emit release-selected and stream-open JSONL events to file descriptor N.
+        Also accepted as --events-fd=N. Event transport failures disable events
+        with one warning while the primary stream continues.
+
 Notes:
         Equivalent duration values and resolved datetime values share one
         latched event. Time and file monitors stop after release or empty
@@ -115,6 +120,9 @@ func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
 		"Equivalent duration values",
 		"equivalent datetime values",
 		"monitoring stop",
+		"--events-fd",
+		"release-selected",
+		"stream-open",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README.md is missing documentation %q", want)
@@ -151,6 +159,9 @@ func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
 		"signal を含まない duration / datetime / file の構成（組合せ含む）",
 		"--describe",
 		"stdin を読まず",
+		"--events-fd",
+		"release-selected",
+		"stream-open",
 	} {
 		if !strings.Contains(agents, want) {
 			t.Errorf("AGENTS.md is missing current-contract documentation %q", want)

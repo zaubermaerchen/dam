@@ -30,6 +30,8 @@ type releaseCoordinator struct {
 	completed      bool
 	fatalErr       error
 	filesStopped   bool
+	releaseHook    func()
+	releaseHookRan bool
 	groups         []releaseGroupState
 	conditionIndex map[releaseConditionKey][]releaseMemberRef
 	filePaths      map[string]*filePathState
@@ -101,7 +103,6 @@ func newReleaseCoordinatorWithGroups(initializing bool, groups []releaseGroup) *
 func (c *releaseCoordinator) requestOpen() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if c.fatalErr != nil {
 		return c.fatalErr
 	}
@@ -117,6 +118,19 @@ func (c *releaseCoordinator) requestOpen() error {
 	}
 	c.commitOpenLocked()
 	return nil
+}
+
+func (c *releaseCoordinator) setReleaseHook(hook func()) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.releaseHook = hook
+	if c.opened && hook != nil && !c.releaseHookRan {
+		c.releaseHookRan = true
+		hook()
+	}
 }
 
 func (c *releaseCoordinator) reportFatal(err error) {
@@ -147,7 +161,6 @@ func (c *releaseCoordinator) reportFatalLocked(err error) {
 func (c *releaseCoordinator) satisfyCondition(kind, source string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if c.fatalErr != nil {
 		return c.fatalErr
 	}
@@ -235,7 +248,6 @@ func (c *releaseCoordinator) reportFileFatal(path string, err error) {
 func (c *releaseCoordinator) finishInitial() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	c.initializing = false
 	if c.fatalErr != nil {
 		return c.fatalErr
@@ -266,6 +278,12 @@ func (c *releaseCoordinator) commitOpenLocked() {
 		return
 	}
 	c.opened = true
+	// Dispatch observation records before closing release so the forwarding
+	// loop cannot make buffered data visible ahead of the OPEN transition.
+	if c.releaseHook != nil && !c.releaseHookRan {
+		c.releaseHookRan = true
+		c.releaseHook()
+	}
 	close(c.release)
 	c.stopFilesLocked()
 }

@@ -11,6 +11,8 @@ type releaseMonitor struct {
 	coordinator *releaseCoordinator
 }
 
+func signalReleaseSupported() bool { return false }
+
 func newReleaseMonitor(configured []string, coordinators ...*releaseCoordinator) (*releaseMonitor, error) {
 	if len(configured) != 0 {
 		return nil, fmt.Errorf("signal release is not supported on this platform")

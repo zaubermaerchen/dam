@@ -2,7 +2,7 @@
 
 ## プロジェクト概要
 
-`dam` は Unix パイプラインの起動ゲートです。v0.4.0 の CLI は `dam CONDITION [--or CONDITION]... [--buffer-size SIZE]`、単独指定の `dam --version`、および `-h` / `--help` を受け付けます。v0.4.0 では条件の構文が breaking change になり、release condition はすべて prefix 付きの positional argument で指定します。duration、datetime、signal、file の条件は OR で組み合わせ、1つの argument 内の ` && ` は AND group を表します。help と version は stdin を読まずに stdout へ出力して終了します。
+`dam` は Unix パイプラインの起動ゲートです。v0.4.0 の CLI は `dam CONDITION [--or CONDITION]... [--buffer-size SIZE]`、単独指定の `dam --version` / `dam --describe`、および `-h` / `--help` を受け付けます。v0.4.0 では条件の構文が breaking change になり、release condition はすべて prefix 付きの positional argument で指定します。duration、datetime、signal、file の条件は OR で組み合わせ、1つの argument 内の ` && ` は AND group を表します。help、version、describe は stdin を読まずに stdout へ出力して終了します。
 
 現在の実装では、次の契約を維持してください。
 
@@ -10,13 +10,14 @@
 - `duration:DURATION` は `time.ParseDuration` 互換とし、`0s` は即時成立、負値と不正値はエラーとします。複数の duration を指定でき、正の duration はすべて stdin の最初の非空 read 完了を同じ開始点として監視します。
 - `datetime:YYYY-MM-DDTHH:MM[:SS]` はローカル時刻として起動時から監視します。秒は省略可能で、無効な日時と存在しない DST 時刻はエラーとします。明示的な timezone は秒付きの strict RFC 3339 (`Z` または `+HH:MM` / `-HH:MM`) のみ受理し、小数秒、小文字の `z`、名前付き timezone、不正な offset はエラーとします。複数の datetime を指定できます。
 - duration は parse 後の値、datetime は解決後の instant が同じ条件なら equivalent として1つの latch/event を共有します。異なる値は独立した条件です。signal alias は正規化しますが、file path は正規化・実体同一性による重複排除を行いません。
-- 条件引数の順序は自由で、`--or CONDITION` と `--or=CONDITION` の両方を受理します。`--or` は直前の condition と次の condition の間に必要で、先頭・末尾・連続・空値はエラーです。`--buffer-size` は条件や `--or` の前後に置け、複数指定時は最後の値を使います。
+- 条件引数の順序は自由で、`--or CONDITION` と `--or=CONDITION` の両方を受理します。`--or` は直前の condition と次の condition の間に必要で、先頭・末尾・連続・空値はエラーです。`--buffer-size SIZE` と `--buffer-size=SIZE` は条件や `--or` の前後に置け、SIZE は正の decimal byte count または `K/k`、`M/m`、`G/g` の binary suffix 付きで、複数指定時は最後の値を使います。
 - 1つの argument 内で exact な ` && ` で連結した条件は AND group です。シェルに `&&` を解釈させないよう group 全体を quote します。group member は成立時に latch するため、成立順序に依存せず、file が成立後に削除されても gate は閉じません。
 - `--version` は単独指定時に `dam <version>\n` を stdout へ出力して終了し、開発時の既定値は `dev` とします。リリースビルドでは `main.version` をリンク時に差し替えます。余分な引数付きの `--version` はエラーです。
+- `--describe` は単独指定時に schema version 1 の compact JSON を stdout へ出力して終了します。CLI、condition form、stdin/stdout/stderr、CLOSED → OPEN と EOF/error の state machine、空の `side_effects` を記述し、duration の `first-non-empty-read-completion` 開始点と `immediate-condition-satisfaction` (`0s`) を含め、signal capability は実行中の build に合わせます。`--describe` は stdin を読まず、release monitor、初回 file probe、pre-release buffer を開始しません。exact な help は優先し、それ以外の併記はエラーです。event-FD interface は記述しません。
 - raw argument が完全一致する `-h` または `--help` は引数位置を問わず最優先で、複数指定でも help を一度だけ stdout へ出力して正常終了します。help 出力は末尾改行付きで、stdin を読まず、release monitor/readiness を開始しません。非完全一致の help 形式は通常の引数エラーです。help と `--version` や未知引数が併記された場合も help が優先され、引数エラー時に全文 help は自動出力しません。
 - file 条件は全対応環境で `os.Stat` 相当の probe を使い symlink をたどります。regular file は成立、存在しない path と dangling symlink は未成立として待機します。directory、FIFO、device、symlink loop、権限エラー、その他の stat error も未成立として診断なしで retry します。同一 path の反復指定は受理しますが、実体 path や大文字小文字による重複排除は行いません。polling 間隔と厳密な検知遅延は公開契約にしません。
 - stdin を読む前に全 file 条件の初回 probe を完了します。初回の stat error や non-regular 結果は pending として扱い、別の file が regular、`0s`、または入力前に届いた signal の release を妨げません。CLOSED 中も次回 probe で retry します。filesystem 上の変化時刻や probe 開始時刻の厳密な先後は保証しません。
-- EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。空 stdin の EOF は release condition を待たず正常終了し、file monitor を停止します。データ受信後の EOF は duration、datetime、signal、または file による解放までデータを保持します。
+- EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。空 stdin の EOF は release condition を待たず正常終了し、file monitor を停止します。データ受信後の EOF または read error は CLOSED のまま保持され、duration、datetime、signal、または file による解放後に held data を転送して EOF/error として終了します。
 - duration、datetime、設定済み signal、file 条件は OR で、一度開いたゲートは再び閉じません。OPEN を確定したら全 file monitor と time monitor を停止し、進行中の probe の完了を待たず、その後に届いた結果を無視します。OPEN 後、最初の stdout write より前でもゲートは OPEN とみなします。
 - 設定済みの SIGUSR1 / SIGUSR2 は最初の入力前から監視し、解放後もプロセス終了まで捕捉・無視します。duration、`0s`、datetime、または file が先に解放した場合も後続 signal でプロセスを終了させません。未設定のUSR signalは捕捉しません。Windows その他の未対応環境では signal を含まない duration / datetime / file の構成（組合せ含む）を受理しますが、signal 設定を含む構成は明示的な引数エラーとして拒否します。
 - 入力をバイナリを含め byte-for-byte で保持し、通常のストリーム処理中の stdout はストリームデータ専用とします。help/version の情報出力は stdout、診断は stderr 専用です。
@@ -27,6 +28,7 @@
 ## リポジトリ構成
 
 - `cmd/dam/main.go`: 引数検証、遅延・注入 release ゲート、stdin/stdout 転送、終了コードを担当します。
+- `cmd/dam/describe.go`: `--describe` の compact JSON schema、CLI/stream/state metadata、build-specific signal capability を担当します。
 - `cmd/dam/release_file.go`: release coordinator と、cross-platform な file 条件の初回 probe、CLOSED 中の polling、OPEN / 空 stdin EOF での停止を担当します。
 - `cmd/dam/release_signal_unix.go`: Unix の SIGUSR1 / SIGUSR2 監視と、解放後も signal を捕捉し続けるライフサイクルを担当します。
 - `cmd/dam/release_signal_windows.go` / `cmd/dam/release_signal_unsupported.go`: file-only / duration / datetime / help / version のビルドを維持しつつ、未対応環境で signal を含む設定を拒否します。

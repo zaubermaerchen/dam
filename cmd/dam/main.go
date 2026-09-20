@@ -24,6 +24,7 @@ const helpText = `Usage:
   dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
   dam --help
   dam --version
+  dam --describe
 
 Hold pipeline output until a release condition is met.
 
@@ -32,7 +33,8 @@ Arguments:
         A condition is one of:
           duration:DURATION
               A positive Go duration (such as 500ms, 3s, or 2m) starts after
-              the first non-empty stdin read. A 0s duration is immediate.
+              the first non-empty stdin read completes. A 0s duration
+              satisfies its condition immediately.
               Multiple positive duration conditions share that starting read.
           datetime:YYYY-MM-DDTHH:MM[:SS]
               An absolute local datetime monitored from startup. Multiple
@@ -69,6 +71,9 @@ Notes:
 
   --version
         Show version and exit.
+
+  --describe
+        Show a compact machine-readable JSON description and exit.
 `
 
 var version = "dev"
@@ -143,6 +148,18 @@ func (clock runtimeClock) normalized() runtimeClock {
 func executeWithClock(args []string, input io.Reader, output, diagnostics io.Writer, ready func(), clock runtimeClock) (int, func()) {
 	if slices.Contains(args, "-h") || slices.Contains(args, "--help") {
 		if err := writeAll(output, []byte(helpText)); err != nil {
+			writeDiagnostic(diagnostics, err)
+			return 1, nil
+		}
+		return 0, nil
+	}
+
+	if describeRequested(args) {
+		if len(args) != 1 {
+			writeDiagnostic(diagnostics, fmt.Errorf("--describe must be specified alone"))
+			return 1, nil
+		}
+		if err := printDescription(output); err != nil {
 			writeDiagnostic(diagnostics, err)
 			return 1, nil
 		}
@@ -729,8 +746,8 @@ func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, dela
 			var timer *time.Timer
 			var timerC <-chan time.Time
 			if delay != nil {
-				// The first non-empty read, rather than process startup, starts
-				// the duration window.
+				// Completion of the first non-empty read, rather than process
+				// startup, starts the duration window.
 				timer = time.NewTimer(*delay)
 				timerC = timer.C
 			}

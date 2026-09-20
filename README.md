@@ -51,6 +51,7 @@ dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
 dam -h
 dam --help
 dam --version
+dam --describe
 ```
 
 Every release condition is a prefixed positional `CONDITION`:
@@ -67,10 +68,10 @@ file:PATH
 ```
 
 `duration:DURATION` accepts Go's `time.ParseDuration` syntax (for example
-`500ms`, `3s`, `2m`, or `1h30m`). `0s` is valid and is immediately satisfied;
-negative and malformed durations are errors. Positive duration conditions
-start from the same first non-empty stdin read, and multiple distinct durations
-are allowed.
+`500ms`, `3s`, `2m`, or `1h30m`). `0s` is valid and immediately satisfies its
+condition; negative and malformed durations are errors. Positive duration
+conditions start from completion of the same first non-empty stdin read, and
+multiple distinct durations are allowed.
 
 `datetime:YYYY-MM-DDTHH:MM[:SS]` is an absolute local datetime monitored from
 startup. Seconds default to `00` when omitted. Years must be between `0001` and
@@ -97,7 +98,9 @@ pre-release stream data held in memory. The default is `64K`. `SIZE` must be a
 positive integer number of bytes, or a positive integer followed by `K`, `k`,
 `M`, `m`, `G`, or `g`; suffixes use binary multipliers (1024, 1024², and
 1024³). Values such as `0`, negative numbers, decimals, `KB`, and `KiB` are
-invalid. This option does not itself provide a release condition.
+invalid. The option may appear before, between, or after conditions and
+`--or` alternatives; when repeated, the last value wins. This option does not
+itself provide a release condition.
 
 ```bash
 printf 'hello' | ./dam duration:3s
@@ -131,6 +134,25 @@ environment-variable expansion are not performed.
 stdout. Development builds use `dev`; release builds replace the version at
 link time. The release workflow verifies the injected version with the Linux
 amd64 artifact before publishing release archives.
+
+## Machine-readable description
+
+`--describe` is valid only as the sole argument and prints one compact JSON
+object describing the current CLI, stream semantics, one-way release-gate
+state machine, and empty `side_effects` array. It does not read stdin, start
+condition monitoring, probe files, or allocate the pre-release buffer. An
+exact `-h` or `--help` still takes priority when combined with `--describe`;
+other combinations are argument errors. The schema version starts at `1`, and
+the top-level fields are `schema_version`, `name`, `version`, `cli_schema`,
+`stream_semantics`, `state_machine`, and `side_effects`. The description
+includes `condition_forms`, the exact ` && ` AND groups, both `--or CONDITION`
+forms, and the bounded-buffer size grammar including its placement and last
+value wins behavior. Duration metadata identifies the
+`first-non-empty-read-completion` start and
+`immediate-condition-satisfaction` for `0s`; satisfying that condition does
+not by itself satisfy an AND group. The signal condition's capability is
+reported for the current build. `--describe` does not claim an event-FD
+interface.
 
 `-h` and `--help` are equivalent. An exact help argument takes precedence over
 all other arguments, prints the help text to stdout, and exits successfully
@@ -172,8 +194,9 @@ monitoring contract.
 
 ## Stream behavior
 
-- Every positive duration condition starts on the first non-empty read from
-  stdin, not when the process starts. A `0s` duration is satisfied immediately.
+- Every positive duration condition starts when the first non-empty read from
+  stdin completes, not when the process starts. A `0s` duration satisfies its
+  own condition immediately; an AND group may remain closed for other members.
   Every datetime condition is monitored from startup.
   With no input, a relative timer is never started and `dam` exits normally
   without waiting for a datetime condition.

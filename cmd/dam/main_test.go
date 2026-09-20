@@ -26,6 +26,7 @@ const expectedHelpText = `Usage:
   dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
   dam --help
   dam --version
+  dam --describe
 
 Hold pipeline output until a release condition is met.
 
@@ -34,7 +35,8 @@ Arguments:
         A condition is one of:
           duration:DURATION
               A positive Go duration (such as 500ms, 3s, or 2m) starts after
-              the first non-empty stdin read. A 0s duration is immediate.
+              the first non-empty stdin read completes. A 0s duration
+              satisfies its condition immediately.
               Multiple positive duration conditions share that starting read.
           datetime:YYYY-MM-DDTHH:MM[:SS]
               An absolute local datetime monitored from startup. Multiple
@@ -71,6 +73,9 @@ Notes:
 
   --version
         Show version and exit.
+
+  --describe
+        Show a compact machine-readable JSON description and exit.
 `
 
 func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
@@ -84,6 +89,14 @@ func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
 	}
 
 	for _, want := range []string{
+		"dam --describe",
+		"schema_version",
+		"condition_forms",
+		"stream_semantics",
+		"state_machine",
+		"side_effects",
+		"first-non-empty-read-completion",
+		"last value wins",
 		"v0.4.0 is a breaking release",
 		"dam 30s\n  -> dam duration:30s",
 		"dam 2026-09-03T18:00\n  -> dam datetime:2026-09-03T18:00",
@@ -125,6 +138,7 @@ func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
 
 	for _, want := range []string{
 		"dam CONDITION [--or CONDITION]... [--buffer-size SIZE]",
+		"dam --describe",
 		"duration:DURATION",
 		"datetime:",
 		"signal:",
@@ -135,6 +149,8 @@ func TestDocumentationDescribesV040MigrationAndCurrentGrammar(t *testing.T) {
 		"起動時",
 		"停止",
 		"signal を含まない duration / datetime / file の構成（組合せ含む）",
+		"--describe",
+		"stdin を読まず",
 	} {
 		if !strings.Contains(agents, want) {
 			t.Errorf("AGENTS.md is missing current-contract documentation %q", want)

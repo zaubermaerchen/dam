@@ -22,6 +22,8 @@ type releaseMonitor struct {
 	coordinator *releaseCoordinator
 }
 
+func signalReleaseSupported() bool { return true }
+
 func newReleaseMonitor(configured []string, coordinators ...*releaseCoordinator) (*releaseMonitor, error) {
 	if len(coordinators) > 1 {
 		return nil, fmt.Errorf("multiple release coordinators are not supported")

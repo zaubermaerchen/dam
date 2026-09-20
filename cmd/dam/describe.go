@@ -91,16 +91,18 @@ type streamInterfaceDescription struct {
 }
 
 type stateDescription struct {
-	InitialState string            `json:"initial_state"`
-	States       []string          `json:"states"`
-	Events       []string          `json:"events"`
-	Transitions  []stateTransition `json:"transitions"`
+	InitialState      string            `json:"initial_state"`
+	States            []string          `json:"states"`
+	Events            []string          `json:"events"`
+	Transitions       []stateTransition `json:"transitions"`
+	TerminalSemantics string            `json:"terminal_semantics"`
 }
 
 type stateTransition struct {
-	From  string `json:"from"`
-	Event string `json:"event"`
-	To    string `json:"to"`
+	From      string `json:"from"`
+	Event     string `json:"event"`
+	To        string `json:"to"`
+	Automatic bool   `json:"automatic,omitempty"`
 }
 
 type sideEffect struct{}
@@ -183,7 +185,7 @@ func newDescription() description {
 				{
 					Name:                            "datetime",
 					Syntax:                          []string{"datetime:YYYY-MM-DDTHH:MM", "datetime:YYYY-MM-DDTHH:MM:SS", "datetime:YYYY-MM-DDTHH:MM:SSZ", "datetime:YYYY-MM-DDTHH:MM:SS+HH:MM", "datetime:YYYY-MM-DDTHH:MM:SS-HH:MM"},
-					TimezoneLessTimezone:            "process-startup",
+					TimezoneLessTimezone:            "process-local-timezone-at-startup",
 					ExplicitTimezoneRequiresSeconds: descriptionBool(true),
 					Fractional:                      descriptionBool(false),
 					IANA:                            descriptionBool(false),
@@ -222,7 +224,7 @@ func newDescription() description {
 		StateMachine: stateDescription{
 			InitialState: "closed",
 			States:       []string{"closed", "closed-buffered-eof", "closed-buffered-error", "open", "empty-eof", "eof", "error"},
-			Events:       []string{"release-condition", "empty-eof", "buffered-eof", "buffered-error", "eof", "error"},
+			Events:       []string{"release-condition", "empty-eof", "buffered-eof", "buffered-error", "buffered-eof-complete", "buffered-error-complete", "eof", "error"},
 			Transitions: []stateTransition{
 				{From: "closed", Event: "release-condition", To: "open"},
 				{From: "closed", Event: "empty-eof", To: "empty-eof"},
@@ -231,9 +233,12 @@ func newDescription() description {
 				{From: "closed", Event: "error", To: "error"},
 				{From: "closed-buffered-eof", Event: "release-condition", To: "open"},
 				{From: "closed-buffered-error", Event: "release-condition", To: "open"},
+				{From: "open", Event: "buffered-eof-complete", To: "eof", Automatic: true},
+				{From: "open", Event: "buffered-error-complete", To: "error", Automatic: true},
 				{From: "open", Event: "eof", To: "eof"},
 				{From: "open", Event: "error", To: "error"},
 			},
+			TerminalSemantics: "release-condition commits open before the first stdout write; buffered EOF/error observed while closed completes through automatic buffered-eof-complete or buffered-error-complete after those held bytes drain, and those completion events require no additional EOF, error, or external event; eof/error describe terminal results first observed after open.",
 		},
 		SideEffects: []sideEffect{},
 	}

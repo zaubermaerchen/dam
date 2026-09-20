@@ -1617,6 +1617,38 @@ func TestForwardWaitsForInjectedEventAfterDataEOF(t *testing.T) {
 	}
 }
 
+func TestForwardCompletesBufferedReadErrorAfterInjectedRelease(t *testing.T) {
+	sentinel := errors.New("buffered input failed")
+	input := dataErrorReader{data: []byte("held until error release"), err: sentinel}
+	event := make(chan struct{})
+	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
+	status := make(chan error, 1)
+	go func() {
+		status <- forward(input, output, nil, event)
+	}()
+
+	select {
+	case <-output.writeTimes:
+		t.Fatal("buffered error wrote output before the release event")
+	case err := <-status:
+		t.Fatalf("buffered error completed before the release event: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(event)
+	select {
+	case err := <-status:
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("forward returned error %v, want sentinel %v", err, sentinel)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("forward did not complete after injected release")
+	}
+	if got, want := output.String(), string(input.data); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
 func TestForwardExitsOnEmptyEOFWithoutWaitingForInjectedEvent(t *testing.T) {
 	event := make(chan struct{})
 	var output bytes.Buffer
@@ -1780,6 +1812,15 @@ type eofReader struct {
 func (r eofReader) Read(p []byte) (int, error) {
 	n := copy(p, r.data)
 	return n, io.EOF
+}
+
+type dataErrorReader struct {
+	data []byte
+	err  error
+}
+
+func (r dataErrorReader) Read(p []byte) (int, error) {
+	return copy(p, r.data), r.err
 }
 
 type backpressureReader struct {

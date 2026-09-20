@@ -240,7 +240,7 @@ func TestDescriptionMetadataMatchesDamContract(t *testing.T) {
 	if description.StateMachine.InitialState != "closed" || !equalDescriptionStrings(description.StateMachine.States, []string{"closed", "closed-buffered-eof", "closed-buffered-error", "open", "empty-eof", "eof", "error"}) {
 		t.Fatalf("state machine initial/states = %#v", description.StateMachine)
 	}
-	if !equalDescriptionStrings(description.StateMachine.Events, []string{"release-condition", "empty-eof", "buffered-eof", "buffered-error", "eof", "error"}) {
+	if !equalDescriptionStrings(description.StateMachine.Events, []string{"release-condition", "empty-eof", "buffered-eof", "buffered-error", "buffered-eof-complete", "buffered-error-complete", "eof", "error"}) {
 		t.Fatalf("state machine events = %#v", description.StateMachine.Events)
 	}
 	wantTransitions := []stateTransition{
@@ -251,6 +251,8 @@ func TestDescriptionMetadataMatchesDamContract(t *testing.T) {
 		{From: "closed", Event: "error", To: "error"},
 		{From: "closed-buffered-eof", Event: "release-condition", To: "open"},
 		{From: "closed-buffered-error", Event: "release-condition", To: "open"},
+		{From: "open", Event: "buffered-eof-complete", To: "eof", Automatic: true},
+		{From: "open", Event: "buffered-error-complete", To: "error", Automatic: true},
 		{From: "open", Event: "eof", To: "eof"},
 		{From: "open", Event: "error", To: "error"},
 	}
@@ -304,6 +306,18 @@ func TestDescriptionDocumentsDurationStartAndZeroRelease(t *testing.T) {
 	}
 }
 
+func TestDescriptionDocumentsProcessLocalTimezoneAtStartup(t *testing.T) {
+	document := marshalDescriptionDocument(t)
+	forms := rawDescriptionConditionForms(t, document)
+	datetime := forms["datetime"]
+	if datetime == nil {
+		t.Fatal("description is missing datetime condition form")
+	}
+	if got, want := rawDescriptionString(t, datetime, "timezone_less_timezone"), "process-local-timezone-at-startup"; got != want {
+		t.Fatalf("timezone-less timezone = %q, want %q", got, want)
+	}
+}
+
 func TestDescriptionStateModelSeparatesEmptyAndBufferedTerminalPaths(t *testing.T) {
 	description := newDescription()
 	wantStates := []string{
@@ -318,7 +332,7 @@ func TestDescriptionStateModelSeparatesEmptyAndBufferedTerminalPaths(t *testing.
 	if !equalDescriptionStrings(description.StateMachine.States, wantStates) {
 		t.Fatalf("states = %#v, want %#v", description.StateMachine.States, wantStates)
 	}
-	wantEvents := []string{"release-condition", "empty-eof", "buffered-eof", "buffered-error", "eof", "error"}
+	wantEvents := []string{"release-condition", "empty-eof", "buffered-eof", "buffered-error", "buffered-eof-complete", "buffered-error-complete", "eof", "error"}
 	if !equalDescriptionStrings(description.StateMachine.Events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", description.StateMachine.Events, wantEvents)
 	}
@@ -330,6 +344,8 @@ func TestDescriptionStateModelSeparatesEmptyAndBufferedTerminalPaths(t *testing.
 		{From: "closed", Event: "error", To: "error"},
 		{From: "closed-buffered-eof", Event: "release-condition", To: "open"},
 		{From: "closed-buffered-error", Event: "release-condition", To: "open"},
+		{From: "open", Event: "buffered-eof-complete", To: "eof", Automatic: true},
+		{From: "open", Event: "buffered-error-complete", To: "error", Automatic: true},
 		{From: "open", Event: "eof", To: "eof"},
 		{From: "open", Event: "error", To: "error"},
 	}
@@ -339,6 +355,49 @@ func TestDescriptionStateModelSeparatesEmptyAndBufferedTerminalPaths(t *testing.
 	for index, want := range wantTransitions {
 		if got := description.StateMachine.Transitions[index]; got != want {
 			t.Errorf("transition %d = %#v, want %#v", index, got, want)
+		}
+	}
+	document := marshalDescriptionDocument(t)
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(document["state_machine"], &state); err != nil {
+		t.Fatalf("decode state machine: %v", err)
+	}
+	semantics := rawDescriptionString(t, state, "terminal_semantics")
+	for _, want := range []string{"commits open before the first stdout write", "automatic", "no additional EOF", "buffered-eof-complete", "buffered-error-complete"} {
+		if !strings.Contains(strings.ToLower(semantics), strings.ToLower(want)) {
+			t.Errorf("terminal semantics = %q, want text containing %q", semantics, want)
+		}
+	}
+}
+
+func TestDescriptionMarksBufferedTerminalCompletionsAutomatic(t *testing.T) {
+	document := marshalDescriptionDocument(t)
+	var state struct {
+		Transitions []map[string]json.RawMessage `json:"transitions"`
+	}
+	if err := json.Unmarshal(document["state_machine"], &state); err != nil {
+		t.Fatalf("decode state machine: %v", err)
+	}
+	wantAutomatic := map[string]bool{
+		"buffered-eof-complete":   true,
+		"buffered-error-complete": true,
+	}
+	for _, transition := range state.Transitions {
+		event := rawDescriptionString(t, transition, "event")
+		rawAutomatic, markedAutomatic := transition["automatic"]
+		if want := wantAutomatic[event]; want {
+			if !markedAutomatic {
+				t.Errorf("transition %q is missing automatic=true", event)
+				continue
+			}
+			var automatic bool
+			if err := json.Unmarshal(rawAutomatic, &automatic); err != nil {
+				t.Errorf("transition %q automatic: %v", event, err)
+			} else if !automatic {
+				t.Errorf("transition %q automatic = false, want true", event)
+			}
+		} else if markedAutomatic {
+			t.Errorf("transition %q unexpectedly has automatic=%s", event, rawAutomatic)
 		}
 	}
 }

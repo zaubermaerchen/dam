@@ -151,8 +151,13 @@ value wins behavior. Duration metadata identifies the
 `first-non-empty-read-completion` start and
 `immediate-condition-satisfaction` for `0s`; satisfying that condition does
 not by itself satisfy an AND group. The signal condition's capability is
-reported for the current build. `--describe` does not claim an event-FD
-interface.
+reported for the current build. Timezone-less datetimes use the
+`process-local-timezone-at-startup` timezone. When EOF or an error is observed
+with held data, the state metadata describes release committing `open` before
+the first stdout write, then the held bytes draining and
+the automatic `buffered-eof-complete` or `buffered-error-complete` finishing
+the already-observed terminal result without an additional EOF, error, or
+external event. `--describe` does not claim an event-FD interface.
 
 `-h` and `--help` are equivalent. An exact help argument takes precedence over
 all other arguments, prints the help text to stdout, and exits successfully

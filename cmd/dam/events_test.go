@@ -127,6 +127,9 @@ func TestRunEventsAreOrderedJSONLAndPrecedeData(t *testing.T) {
 }
 
 func TestRunFileAndGroupEmitsOneOpenTransition(t *testing.T) {
+	if !eventFDSupported() {
+		t.Skip("event FD transport is unsupported on this target")
+	}
 	eventsFile := openEventFile(t)
 	defer eventsFile.Close()
 	readyFile := openEventFile(t)

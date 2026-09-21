@@ -199,6 +199,46 @@ func TestEngineRootSelectionStopsTimeAndFileMonitorsButCloseStopsSignals(t *test
 	engine.Close()
 }
 
+func TestEngineInitializesTimedMonitorBeforeSignalMonitor(t *testing.T) {
+	engine, err := New([]Group{{Members: []Condition{{Kind: "signal", Source: "SIGUSR1"}}}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Let the injected monitor callback represent a signal consumed while the
+	// signal monitor is being constructed. This makes the startup ordering
+	// observable without relying on scheduler timing or an OS signal.
+	engine.mu.Lock()
+	engine.initializing = false
+	engine.mu.Unlock()
+	engine.signalMonitorFactory = func(_ []string, current *Engine) (*releaseMonitor, error) {
+		if current.timed == nil {
+			t.Error("timed monitor was not initialized before signal monitor construction")
+		}
+		if err := current.satisfyCondition("signal", "SIGUSR1"); err != nil {
+			t.Errorf("satisfy signal: %v", err)
+		}
+		return &releaseMonitor{engine: current}, nil
+	}
+
+	if err := engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-engine.Satisfied():
+	default:
+		t.Fatal("signal did not select the root condition")
+	}
+
+	engine.timed.mu.Lock()
+	timedClosed := engine.timed.closed
+	engine.timed.mu.Unlock()
+	if !timedClosed {
+		t.Fatal("timed monitor was installed after signal selection")
+	}
+}
+
 func TestEngineCompleteEmptyReportsPriorSelection(t *testing.T) {
 	engine, err := New([]Group{{Members: []Condition{{Kind: "duration", Duration: 0}}}}, Options{})
 	if err != nil {

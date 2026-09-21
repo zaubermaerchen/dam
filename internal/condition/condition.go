@@ -52,6 +52,9 @@ type Engine struct {
 	newTimer         func(time.Duration) (<-chan time.Time, func())
 	fileProbe        fileProbe
 	filePollInterval time.Duration
+	// signalMonitorFactory is a test seam for making startup ordering
+	// deterministic; production uses the platform signal monitor below.
+	signalMonitorFactory func([]string, *Engine) (*releaseMonitor, error)
 }
 
 // New builds an engine from typed conditions. Group and member slices are
@@ -98,14 +101,17 @@ func (engine *Engine) Start() error {
 	engine.started = true
 	engine.mu.Unlock()
 
+	// The signal monitor starts a consumer goroutine. Initialize the timed
+	// monitor first so a signal consumed during startup cannot select the root
+	// while engine.timed is still being assigned.
+	engine.timed = newTimedReleaseMonitor(engine, engine.now, engine.newTimer)
 	configuredSignals := engine.configuredSignals()
-	signals, err := newReleaseMonitor(configuredSignals, engine)
+	signals, err := engine.startSignalMonitor(configuredSignals)
 	if err != nil {
 		engine.Close()
 		return err
 	}
 	engine.signals = signals
-	engine.timed = newTimedReleaseMonitor(engine, engine.now, engine.newTimer)
 	// Datetimes are armed before probing files so a due datetime becomes a
 	// pending selection while all initial probes are still accounted for.
 	if err := engine.timed.startDatetimes(); err != nil {
@@ -135,6 +141,13 @@ func (engine *Engine) Start() error {
 		}
 	}
 	return nil
+}
+
+func (engine *Engine) startSignalMonitor(configured []string) (*releaseMonitor, error) {
+	if engine.signalMonitorFactory != nil {
+		return engine.signalMonitorFactory(configured, engine)
+	}
+	return newReleaseMonitor(configured, engine)
 }
 
 // StartDurations starts all distinct duration values from one shared instant.

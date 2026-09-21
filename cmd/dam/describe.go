@@ -5,6 +5,8 @@ package main
 import (
 	"encoding/json"
 	"io"
+
+	"github.com/zaubermaerchen/dam/internal/condition"
 )
 
 type description struct {
@@ -117,7 +119,7 @@ func describeRequested(args []string) bool {
 }
 
 func newDescription() description {
-	signalSupported := descriptionBool(signalReleaseSupported())
+	signalSupported := descriptionBool(condition.SignalSupported())
 	return description{
 		SchemaVersion: 1,
 		Name:          "dam",

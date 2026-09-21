@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zaubermaerchen/dam/internal/condition"
 )
 
 func TestRunDescribeWritesCompactJSONWithoutStartingRuntime(t *testing.T) {
@@ -183,8 +185,8 @@ func TestDescriptionMetadataMatchesDamContract(t *testing.T) {
 	if got := description.CLISchema.ConditionForms[0].Syntax; len(got) != 4 || got[0] != "signal:USR1" || got[1] != "signal:SIGUSR1" || got[2] != "signal:USR2" || got[3] != "signal:SIGUSR2" {
 		t.Fatalf("signal syntax = %#v", got)
 	}
-	if description.CLISchema.ConditionForms[0].Supported == nil || *description.CLISchema.ConditionForms[0].Supported != signalReleaseSupported() {
-		t.Fatalf("signal supported = %v, want capability %v", description.CLISchema.ConditionForms[0].Supported, signalReleaseSupported())
+	if description.CLISchema.ConditionForms[0].Supported == nil || *description.CLISchema.ConditionForms[0].Supported != condition.SignalSupported() {
+		t.Fatalf("signal supported = %v, want capability %v", description.CLISchema.ConditionForms[0].Supported, condition.SignalSupported())
 	}
 	if got := description.CLISchema.ConditionForms[1].Syntax; len(got) != 1 || got[0] != "file:<path>" {
 		t.Fatalf("file syntax = %#v", got)

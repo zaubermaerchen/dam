@@ -1,7 +1,7 @@
-package main
+package condition
 
 // This file starts duration and datetime release events and stops their
-// timers with the coordinator's existing OPEN/empty-input lifecycle.
+// timers with the engine's existing OPEN/empty-input lifecycle.
 
 import (
 	"slices"
@@ -11,9 +11,9 @@ import (
 )
 
 type timedReleaseMonitor struct {
-	coordinator *releaseCoordinator
-	now         func() time.Time
-	newTimer    func(time.Duration) (<-chan time.Time, func())
+	engine   *Engine
+	now      func() time.Time
+	newTimer func(time.Duration) (<-chan time.Time, func())
 
 	mu               sync.Mutex
 	closed           bool
@@ -29,25 +29,28 @@ type timedReleaseTimer struct {
 	done      chan struct{}
 }
 
-func newTimedReleaseMonitor(coordinator *releaseCoordinator, now func() time.Time, newTimer func(time.Duration) (<-chan time.Time, func())) *timedReleaseMonitor {
-	if coordinator == nil {
+func newTimedReleaseMonitor(engine *Engine, now func() time.Time, newTimer func(time.Duration) (<-chan time.Time, func())) *timedReleaseMonitor {
+	if engine == nil {
 		return nil
 	}
 	if now == nil {
 		now = time.Now
 	}
 	if newTimer == nil {
-		newTimer = defaultRuntimeClock().newTimer
+		newTimer = func(delay time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(delay)
+			return timer.C, func() { timer.Stop() }
+		}
 	}
 	return &timedReleaseMonitor{
-		coordinator: coordinator,
-		now:         now,
-		newTimer:    newTimer,
+		engine:   engine,
+		now:      now,
+		newTimer: newTimer,
 	}
 }
 
 func (monitor *timedReleaseMonitor) startDatetimes() error {
-	if monitor == nil || monitor.coordinator == nil {
+	if monitor == nil || monitor.engine == nil {
 		return nil
 	}
 	monitor.mu.Lock()
@@ -58,7 +61,7 @@ func (monitor *timedReleaseMonitor) startDatetimes() error {
 	monitor.datetimesStarted = true
 	monitor.mu.Unlock()
 
-	_, datetimes := monitor.coordinator.timedConditions()
+	_, datetimes := monitor.engine.timedConditions()
 	startedAt := monitor.now()
 	for _, deadline := range datetimes {
 		if err := monitor.startEventAt("datetime", datetimeReleaseKey(deadline), deadline, startedAt); err != nil {
@@ -70,7 +73,7 @@ func (monitor *timedReleaseMonitor) startDatetimes() error {
 }
 
 func (monitor *timedReleaseMonitor) startDurations() error {
-	if monitor == nil || monitor.coordinator == nil {
+	if monitor == nil || monitor.engine == nil {
 		return nil
 	}
 	monitor.mu.Lock()
@@ -81,7 +84,7 @@ func (monitor *timedReleaseMonitor) startDurations() error {
 	monitor.durationsStarted = true
 	monitor.mu.Unlock()
 
-	durations, _ := monitor.coordinator.timedConditions()
+	durations, _ := monitor.engine.timedConditions()
 	startedAt := monitor.now()
 	for _, duration := range durations {
 		if err := monitor.startEventAt("duration", durationReleaseKey(duration), startedAt.Add(duration), startedAt); err != nil {
@@ -100,14 +103,14 @@ func (monitor *timedReleaseMonitor) startEvent(kind, source string, target time.
 }
 
 func (monitor *timedReleaseMonitor) startEventAt(kind, source string, target, current time.Time) error {
-	if monitor == nil || monitor.coordinator == nil {
+	if monitor == nil || monitor.engine == nil {
 		return nil
 	}
-	if releaseChannelReady(monitor.coordinator.release) || monitoringStopped(monitor.coordinator.files) {
+	if releaseChannelReady(monitor.engine.release) || monitoringStopped(monitor.engine.files) {
 		return nil
 	}
 	if !target.After(current) {
-		return monitor.coordinator.satisfyCondition(kind, source)
+		return monitor.engine.satisfyCondition(kind, source)
 	}
 
 	wait := target.Sub(current)
@@ -125,7 +128,7 @@ func (monitor *timedReleaseMonitor) startEventAt(kind, source string, target, cu
 	}
 	timer := &timedReleaseTimer{stopTimer: stopTimer, done: make(chan struct{})}
 	monitor.mu.Lock()
-	if monitor.closed || releaseChannelReady(monitor.coordinator.release) || monitoringStopped(monitor.coordinator.files) {
+	if monitor.closed || releaseChannelReady(monitor.engine.release) || monitoringStopped(monitor.engine.files) {
 		monitor.mu.Unlock()
 		timer.stop()
 		return nil
@@ -146,7 +149,7 @@ func (monitor *timedReleaseMonitor) waitForEvent(timer *timedReleaseTimer, kind,
 			}
 			current := monitor.now()
 			if !capped || !target.After(current) {
-				_ = monitor.coordinator.satisfyCondition(kind, source)
+				_ = monitor.engine.satisfyCondition(kind, source)
 				return
 			}
 			wait := target.Sub(current)
@@ -166,10 +169,10 @@ func (monitor *timedReleaseMonitor) waitForEvent(timer *timedReleaseTimer, kind,
 				return
 			}
 			timerC = nextTimer
-		case <-monitor.coordinator.release:
+		case <-monitor.engine.release:
 			timer.stop()
 			return
-		case <-monitor.coordinator.files:
+		case <-monitor.engine.files:
 			timer.stop()
 			return
 		case <-timer.doneChannel():
@@ -243,25 +246,25 @@ func (monitor *timedReleaseMonitor) Close() {
 	}
 }
 
-func (coordinator *releaseCoordinator) timedConditions() ([]time.Duration, []time.Time) {
-	if coordinator == nil {
+func (engine *Engine) timedConditions() ([]time.Duration, []time.Time) {
+	if engine == nil {
 		return nil, nil
 	}
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
 
-	durationValues := make(map[releaseConditionKey]time.Duration)
-	datetimeValues := make(map[releaseConditionKey]time.Time)
-	for _, group := range coordinator.groups {
+	durationValues := make(map[conditionKey]time.Duration)
+	datetimeValues := make(map[conditionKey]time.Time)
+	for _, group := range engine.groups {
 		for _, member := range group.members {
-			switch member.condition.kind {
+			switch member.condition.Kind {
 			case "duration":
 				if value, ok := durationReleaseValue(member.condition); ok {
-					durationValues[releaseConditionKeyFor(member.condition)] = value
+					durationValues[conditionKeyFor(member.condition)] = value
 				}
 			case "datetime":
 				if value, ok := datetimeReleaseValue(member.condition); ok {
-					datetimeValues[releaseConditionKeyFor(member.condition)] = value
+					datetimeValues[conditionKeyFor(member.condition)] = value
 				}
 			}
 		}
@@ -290,45 +293,32 @@ func (coordinator *releaseCoordinator) timedConditions() ([]time.Duration, []tim
 	return durations, datetimes
 }
 
-func durationReleaseValue(condition releaseCondition) (time.Duration, bool) {
-	if condition.source != "" {
-		value, err := time.ParseDuration(condition.source)
-		if err == nil {
-			return value, value >= 0
-		}
-	}
-	if condition.duration >= 0 {
-		return condition.duration, true
+func durationReleaseValue(condition Condition) (time.Duration, bool) {
+	if condition.Kind == "duration" && condition.Duration >= 0 {
+		return condition.Duration, true
 	}
 	return 0, false
 }
 
-func datetimeReleaseValue(condition releaseCondition) (time.Time, bool) {
-	if condition.source != "" {
-		value, err := time.Parse(time.RFC3339Nano, condition.source)
-		if err == nil {
-			return value, true
-		}
-		if !condition.deadline.IsZero() {
-			return condition.deadline, true
-		}
-		return time.Time{}, false
+func datetimeReleaseValue(condition Condition) (time.Time, bool) {
+	if condition.Kind == "datetime" && !condition.Deadline.IsZero() {
+		return condition.Deadline, true
 	}
-	return condition.deadline, true
+	return time.Time{}, false
 }
 
-func releaseConditionKeyFor(condition releaseCondition) releaseConditionKey {
-	switch condition.kind {
+func conditionKeyFor(condition Condition) conditionKey {
+	switch condition.Kind {
 	case "duration":
 		if value, ok := durationReleaseValue(condition); ok {
-			return releaseConditionKey{kind: "duration", source: durationReleaseKey(value)}
+			return conditionKey{kind: "duration", source: durationReleaseKey(value)}
 		}
 	case "datetime":
 		if value, ok := datetimeReleaseValue(condition); ok {
-			return releaseConditionKey{kind: "datetime", source: datetimeReleaseKey(value)}
+			return conditionKey{kind: "datetime", source: datetimeReleaseKey(value)}
 		}
 	}
-	return releaseConditionKey{kind: condition.kind, source: condition.source}
+	return conditionKey{kind: condition.Kind, source: condition.Source}
 }
 
 func durationReleaseKey(value time.Duration) string {
@@ -339,10 +329,10 @@ func datetimeReleaseKey(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func (coordinator *releaseCoordinator) satisfyDuration(value time.Duration) error {
-	return coordinator.satisfyCondition("duration", durationReleaseKey(value))
+func (engine *Engine) satisfyDuration(value time.Duration) error {
+	return engine.satisfyCondition("duration", durationReleaseKey(value))
 }
 
-func (coordinator *releaseCoordinator) satisfyDatetime(value time.Time) error {
-	return coordinator.satisfyCondition("datetime", datetimeReleaseKey(value))
+func (engine *Engine) satisfyDatetime(value time.Time) error {
+	return engine.satisfyCondition("datetime", datetimeReleaseKey(value))
 }

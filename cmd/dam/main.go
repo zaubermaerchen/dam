@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/zaubermaerchen/dam/internal/condition"
 	"github.com/zaubermaerchen/dam/internal/events"
 )
 
@@ -185,58 +186,42 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 	}
 	eventSink := events.New(config.eventsFD, diagnostics)
 
-	coordinator := newReleaseCoordinatorWithGroups(true, config.releaseGroups())
-	if eventSink != nil {
-		coordinator.setReleaseHook(eventSink.EmitOpen)
-	}
-	monitor, err := newReleaseMonitor(config.signals, coordinator)
+	engine, err := condition.New(config.conditionPlan(), condition.Options{
+		Now:      clock.now,
+		NewTimer: clock.newTimer,
+	})
 	if err != nil {
-		eventSink.Close()
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
 	}
-	timedMonitor := newTimedReleaseMonitor(coordinator, clock.now, clock.newTimer)
+	gate := newReleaseGate(engine, eventSink)
 	cleanup := func() {
-		timedMonitor.Close()
-		monitor.Close()
+		gate.close()
 		eventSink.Close()
 	}
-	// Datetime conditions must be armed before the initial file probes. The
-	// coordinator remains initializing so a due datetime can only become a
-	// pending release while all initial file probes complete.
-	if err := timedMonitor.startDatetimes(); err != nil {
+	if err := engine.Start(); err != nil {
 		writeDiagnostic(diagnostics, err)
 		cleanup()
 		return 1, cleanup
 	}
-	if len(config.files) > 0 {
-		if _, err := newFileMonitor(config.files, coordinator); err != nil {
+	// A condition can be selected during startup (notably duration:0s or an
+	// already-regular file). Commit that transition before the first stdin
+	// read starts so a blocked or empty input cannot observe a half-emitted
+	// lifecycle transition.
+	select {
+	case <-gate.selected():
+		if err := gate.commitOpen(); err != nil {
 			writeDiagnostic(diagnostics, err)
 			cleanup()
 			return 1, cleanup
 		}
-	} else if err := coordinator.finishInitial(); err != nil {
-		writeDiagnostic(diagnostics, err)
-		cleanup()
-		return 1, cleanup
-	}
-	if err := coordinator.fatalError(); err != nil {
-		writeDiagnostic(diagnostics, err)
-		cleanup()
-		return 1, cleanup
-	}
-	if config.immediateDuration {
-		if err := coordinator.satisfyDuration(0); err != nil {
-			writeDiagnostic(diagnostics, err)
-			cleanup()
-			return 1, cleanup
-		}
+	default:
 	}
 	if ready != nil {
 		ready()
 	}
 
-	if err := forwardWithFailureAndBufferAndStart(input, output, nil, monitor.Release(), monitor.Failures(), coordinator.requestOpen, coordinator.completeEmpty, config.bufferSize, timedMonitor.startDurations); err != nil {
+	if err := forwardWithFailureAndBufferAndStart(input, output, nil, gate.selected(), engine.Failures(), gate.commitOpen, gate.completeEmpty, config.bufferSize, engine.StartDurations); err != nil {
 		writeDiagnostic(diagnostics, err)
 		cleanup()
 		return 1, cleanup
@@ -296,6 +281,17 @@ func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, dela
 			}
 			if result.n == 0 {
 				if result.err == io.EOF {
+					// Prefer a root that became selected while the first read
+					// completed over treating the same boundary as empty input.
+					// Otherwise completeEmpty may close the condition engine
+					// before the runtime emits the OPEN lifecycle events.
+					select {
+					case <-release:
+						if err := commitOpen(open, failures); err != nil {
+							return err
+						}
+					default:
+					}
 					return completeEmptyInput(completeEmpty, failures)
 				}
 				if result.err != nil {

@@ -1,4 +1,4 @@
-package main
+package condition
 
 // This file coordinates release sources and polls configured filesystem paths.
 
@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"sync"
 	"time"
 )
 
@@ -15,48 +14,40 @@ const (
 	filePollMaxInterval = 250 * time.Millisecond
 )
 
-// releaseCoordinator serializes release-condition latches and failures from
-// release monitors. The mutex makes the OPEN/error boundary deterministic.
-type releaseCoordinator struct {
-	mu sync.Mutex
-
-	release chan struct{}
-	fatal   chan error
-	files   chan struct{}
-
-	initializing   bool
-	pendingOpen    bool
-	opened         bool
-	completed      bool
-	fatalErr       error
-	filesStopped   bool
-	releaseHook    func()
-	releaseHookRan bool
-	groups         []releaseGroupState
-	conditionIndex map[releaseConditionKey][]releaseMemberRef
-	filePaths      map[string]*filePathState
+// Condition is one typed release condition. Source is the canonical signal,
+// duration, or datetime value, or the original file path.
+type Condition struct {
+	Kind     string
+	Source   string
+	Duration time.Duration
+	Deadline time.Time
 }
 
-func newReleaseCoordinator(initializing bool) *releaseCoordinator {
-	return newReleaseCoordinatorWithGroups(initializing, nil)
+// Group is an AND group. Groups are alternatives (OR) in the order supplied.
+type Group struct {
+	Members []Condition
 }
 
-type releaseGroupState struct {
-	members   []releaseMemberState
+func newEngine(initializing bool) *Engine {
+	return newEngineWithGroups(initializing, nil)
+}
+
+type groupState struct {
+	members   []memberState
 	remaining int
 }
 
-type releaseMemberState struct {
-	condition releaseCondition
+type memberState struct {
+	condition Condition
 	satisfied bool
 }
 
-type releaseConditionKey struct {
+type conditionKey struct {
 	kind   string
 	source string
 }
 
-type releaseMemberRef struct {
+type memberRef struct {
 	groupIndex  int
 	memberIndex int
 }
@@ -67,29 +58,29 @@ type filePathState struct {
 	remaining int
 }
 
-func newReleaseCoordinatorWithGroups(initializing bool, groups []releaseGroup) *releaseCoordinator {
-	groupStates := make([]releaseGroupState, len(groups))
-	conditionIndex := make(map[releaseConditionKey][]releaseMemberRef)
+func newEngineWithGroups(initializing bool, groups []Group) *Engine {
+	groupStates := make([]groupState, len(groups))
+	conditionIndex := make(map[conditionKey][]memberRef)
 	filePaths := make(map[string]*filePathState)
 	for groupIndex, group := range groups {
-		members := make([]releaseMemberState, len(group.members))
-		for memberIndex, condition := range group.members {
-			members[memberIndex] = releaseMemberState{condition: condition}
-			ref := releaseMemberRef{groupIndex: groupIndex, memberIndex: memberIndex}
-			key := releaseConditionKeyFor(condition)
+		members := make([]memberState, len(group.Members))
+		for memberIndex, condition := range group.Members {
+			members[memberIndex] = memberState{condition: condition}
+			ref := memberRef{groupIndex: groupIndex, memberIndex: memberIndex}
+			key := conditionKeyFor(condition)
 			conditionIndex[key] = append(conditionIndex[key], ref)
-			if condition.kind == "file" {
-				state := filePaths[condition.source]
+			if condition.Kind == "file" {
+				state := filePaths[condition.Source]
 				if state == nil {
 					state = &filePathState{}
-					filePaths[condition.source] = state
+					filePaths[condition.Source] = state
 				}
 				state.remaining++
 			}
 		}
-		groupStates[groupIndex] = releaseGroupState{members: members, remaining: len(members)}
+		groupStates[groupIndex] = groupState{members: members, remaining: len(members)}
 	}
-	return &releaseCoordinator{
+	return &Engine{
 		release:        make(chan struct{}),
 		fatal:          make(chan error, 1),
 		files:          make(chan struct{}),
@@ -100,40 +91,7 @@ func newReleaseCoordinatorWithGroups(initializing bool, groups []releaseGroup) *
 	}
 }
 
-func (c *releaseCoordinator) requestOpen() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.fatalErr != nil {
-		return c.fatalErr
-	}
-	if c.opened {
-		return nil
-	}
-	if c.completed {
-		return nil
-	}
-	if c.initializing {
-		c.pendingOpen = true
-		return nil
-	}
-	c.commitOpenLocked()
-	return nil
-}
-
-func (c *releaseCoordinator) setReleaseHook(hook func()) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.releaseHook = hook
-	if c.opened && hook != nil && !c.releaseHookRan {
-		c.releaseHookRan = true
-		hook()
-	}
-}
-
-func (c *releaseCoordinator) reportFatal(err error) {
+func (c *Engine) reportFatal(err error) {
 	if err == nil {
 		return
 	}
@@ -143,11 +101,11 @@ func (c *releaseCoordinator) reportFatal(err error) {
 	c.reportFatalLocked(err)
 }
 
-func (c *releaseCoordinator) reportFatalLocked(err error) {
+func (c *Engine) reportFatalLocked(err error) {
 	if err == nil {
 		return
 	}
-	if c.opened || c.completed || c.fatalErr != nil {
+	if c.rootSatisfied || c.closed || c.fatalErr != nil {
 		return
 	}
 	c.fatalErr = err
@@ -158,27 +116,27 @@ func (c *releaseCoordinator) reportFatalLocked(err error) {
 // satisfyCondition records one physical event for every matching member. It
 // deliberately fans out instead of consuming an event per member: duplicate
 // conditions and aliases describe the same latch, not a count of events.
-func (c *releaseCoordinator) satisfyCondition(kind, source string) error {
+func (c *Engine) satisfyCondition(kind, source string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fatalErr != nil {
 		return c.fatalErr
 	}
-	if c.opened || c.completed {
+	if c.rootSatisfied || c.closed {
 		return nil
 	}
 
 	if len(c.groups) == 0 {
 		if c.initializing {
-			c.pendingOpen = true
+			c.pendingSatisfied = true
 		} else {
-			c.commitOpenLocked()
+			c.selectRootLocked()
 		}
 		return nil
 	}
 
 	groupSatisfied := false
-	key := releaseConditionKey{kind: kind, source: source}
+	key := conditionKey{kind: kind, source: source}
 	for _, ref := range c.conditionIndex[key] {
 		group := &c.groups[ref.groupIndex]
 		member := &group.members[ref.memberIndex]
@@ -198,15 +156,18 @@ func (c *releaseCoordinator) satisfyCondition(kind, source string) error {
 	}
 	if groupSatisfied {
 		if c.initializing {
-			c.pendingOpen = true
+			c.pendingSatisfied = true
 		} else {
-			c.commitOpenLocked()
+			timed := c.selectRootLocked()
+			if timed != nil {
+				timed.Close()
+			}
 		}
 	}
 	return nil
 }
 
-func (c *releaseCoordinator) satisfySignal(signal string) error {
+func (c *Engine) satisfySignal(signal string) error {
 	switch signal {
 	case "USR1":
 		signal = "SIGUSR1"
@@ -216,24 +177,24 @@ func (c *releaseCoordinator) satisfySignal(signal string) error {
 	return c.satisfyCondition("signal", signal)
 }
 
-func (c *releaseCoordinator) reportFileReady(path string) error {
+func (c *Engine) reportFileReady(path string) error {
 	return c.satisfyCondition("file", path)
 }
 
-func (c *releaseCoordinator) filePathSatisfied(path string) bool {
+func (c *Engine) filePathSatisfied(path string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.filePathSatisfiedLocked(path)
 }
 
-func (c *releaseCoordinator) filePathSatisfiedLocked(path string) bool {
+func (c *Engine) filePathSatisfiedLocked(path string) bool {
 	state := c.filePaths[path]
 	return state != nil && state.remaining == 0
 }
 
-// reportFileFatal remains available for coordinator-level failure reporting;
+// reportFileFatal remains available for engine-level failure reporting;
 // file probes no longer call it because stat failures are retryable.
-func (c *releaseCoordinator) reportFileFatal(path string, err error) {
+func (c *Engine) reportFileFatal(path string, err error) {
 	if err == nil {
 		return
 	}
@@ -245,56 +206,45 @@ func (c *releaseCoordinator) reportFileFatal(path string, err error) {
 	c.reportFatalLocked(err)
 }
 
-func (c *releaseCoordinator) finishInitial() error {
+func (c *Engine) finishInitial() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.initializing = false
 	if c.fatalErr != nil {
+		c.mu.Unlock()
 		return c.fatalErr
 	}
-	if c.pendingOpen {
-		c.commitOpenLocked()
-	}
-	return nil
-}
-
-func (c *releaseCoordinator) completeEmpty() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.fatalErr != nil {
-		return c.fatalErr
-	}
-	if c.opened || c.completed {
+	if c.pendingSatisfied {
+		timed := c.selectRootLocked()
+		c.mu.Unlock()
+		if timed != nil {
+			timed.Close()
+		}
 		return nil
 	}
-	c.completed = true
-	c.stopFilesLocked()
+	c.mu.Unlock()
 	return nil
 }
 
-func (c *releaseCoordinator) commitOpenLocked() {
-	if c.opened {
-		return
+// selectRootLocked publishes the root condition result and stops only the
+// file/timer monitors. Unix signal capture intentionally remains active until
+// Engine.Close so later configured signals are consumed safely after OPEN.
+func (c *Engine) selectRootLocked() *timedReleaseMonitor {
+	if c.rootSatisfied || c.closed {
+		return nil
 	}
-	c.opened = true
-	// Dispatch observation records before closing release so the forwarding
-	// loop cannot make buffered data visible ahead of the OPEN transition.
-	if c.releaseHook != nil && !c.releaseHookRan {
-		c.releaseHookRan = true
-		c.releaseHook()
-	}
+	c.rootSatisfied = true
 	close(c.release)
 	c.stopFilesLocked()
+	return c.timed
 }
 
-func (c *releaseCoordinator) stopFiles() {
+func (c *Engine) stopFiles() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopFilesLocked()
 }
 
-func (c *releaseCoordinator) stopFilesLocked() {
+func (c *Engine) stopFilesLocked() {
 	if c.filesStopped {
 		return
 	}
@@ -305,13 +255,13 @@ func (c *releaseCoordinator) stopFilesLocked() {
 // beginFileProbe checks the stopped state under the same mutex used to stop
 // monitoring. OPEN/EOF may stop monitoring after a true result; the probe may
 // then run, but the transition does not wait for it and its result is ignored.
-func (c *releaseCoordinator) beginFileProbe() bool {
+func (c *Engine) beginFileProbe() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return !c.filesStopped
 }
 
-func (c *releaseCoordinator) fatalError() error {
+func (c *Engine) fatalError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.fatalErr
@@ -328,11 +278,11 @@ func probeFileRelease(path string) (bool, error) {
 }
 
 type fileMonitor struct {
-	coordinator *releaseCoordinator
-	paths       []string
-	probe       fileProbe
-	interval    time.Duration
-	wait        filePollWait
+	engine   *Engine
+	paths    []string
+	probe    fileProbe
+	interval time.Duration
+	wait     filePollWait
 }
 
 // filePollWait waits for one poll interval or for monitoring to stop. Tests
@@ -351,13 +301,13 @@ func nextFilePollInterval(interval time.Duration) time.Duration {
 	return next
 }
 
-func newFileMonitor(paths []string, coordinator *releaseCoordinator) (*fileMonitor, error) {
-	return newFileMonitorWithProbe(paths, coordinator, probeFileRelease, filePollInterval)
+func newFileMonitor(paths []string, engine *Engine) (*fileMonitor, error) {
+	return newFileMonitorWithProbe(paths, engine, probeFileRelease, filePollInterval)
 }
 
-func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, probe fileProbe, interval time.Duration) (*fileMonitor, error) {
-	if coordinator == nil {
-		return nil, fmt.Errorf("file monitor requires a release coordinator")
+func newFileMonitorWithProbe(paths []string, engine *Engine, probe fileProbe, interval time.Duration) (*fileMonitor, error) {
+	if engine == nil {
+		return nil, fmt.Errorf("file monitor requires a release engine")
 	}
 	if probe == nil {
 		return nil, fmt.Errorf("file monitor requires a file probe")
@@ -366,10 +316,10 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 		interval = time.Nanosecond
 	}
 	monitor := &fileMonitor{
-		coordinator: coordinator,
-		paths:       slices.Clone(paths),
-		probe:       probe,
-		interval:    interval,
+		engine:   engine,
+		paths:    slices.Clone(paths),
+		probe:    probe,
+		interval: interval,
 	}
 	if len(monitor.paths) == 0 {
 		return monitor, nil
@@ -388,28 +338,26 @@ func newFileMonitorWithProbe(paths []string, coordinator *releaseCoordinator, pr
 
 	orderedResults := collectOrderedInitialFileProbeResults(results, len(monitor.paths))
 	_, anyReady := summarizeInitialFileProbeResults(orderedResults)
-	if len(coordinator.groups) > 0 {
+	if len(engine.groups) > 0 {
 		for _, result := range orderedResults {
 			if result.err == nil && result.ready {
-				_ = coordinator.reportFileReady(monitor.paths[result.index])
+				_ = engine.reportFileReady(monitor.paths[result.index])
 			}
 		}
 	}
-	if err := coordinator.finishInitial(); err != nil {
+	if err := engine.finishInitial(); err != nil {
 		return monitor, err
 	}
-	if len(coordinator.groups) == 0 && anyReady {
-		if err := coordinator.requestOpen(); err != nil {
-			return monitor, err
-		}
+	if len(engine.groups) == 0 && anyReady {
+		engine.selectRoot()
 		return monitor, nil
 	}
 
 	for _, path := range monitor.paths {
-		if monitoringStopped(coordinator.files) {
+		if monitoringStopped(engine.files) {
 			break
 		}
-		if coordinator.filePathSatisfied(path) {
+		if engine.filePathSatisfied(path) {
 			continue
 		}
 		go monitor.watchPath(path)
@@ -446,13 +394,13 @@ func summarizeInitialFileProbeResults(orderedResults []fileProbeResult) (firstFa
 }
 
 func (m *fileMonitor) Close() {
-	if m != nil && m.coordinator != nil {
-		m.coordinator.stopFiles()
+	if m != nil && m.engine != nil {
+		m.engine.stopFiles()
 	}
 }
 
 func (m *fileMonitor) watchPath(path string) {
-	if monitoringStopped(m.coordinator.files) {
+	if monitoringStopped(m.engine.files) {
 		return
 	}
 
@@ -461,10 +409,10 @@ func (m *fileMonitor) watchPath(path string) {
 		if !m.waitForPoll(path, interval) {
 			return
 		}
-		// Recheck the stopped state under the coordinator mutex before the
+		// Recheck the stopped state under the engine mutex before the
 		// probe. OPEN/EOF may still race after this check; that probe's result
 		// is then ignored.
-		if !m.coordinator.beginFileProbe() {
+		if !m.engine.beginFileProbe() {
 			return
 		}
 		ready, err := m.probe(path)
@@ -472,7 +420,7 @@ func (m *fileMonitor) watchPath(path string) {
 			ready = false
 		}
 		if ready {
-			_ = m.coordinator.reportFileReady(path)
+			_ = m.engine.reportFileReady(path)
 			return
 		}
 		interval = nextFilePollInterval(interval)
@@ -481,12 +429,12 @@ func (m *fileMonitor) watchPath(path string) {
 
 func (m *fileMonitor) waitForPoll(path string, interval time.Duration) bool {
 	if m.wait != nil {
-		return m.wait(path, m.coordinator.files, interval)
+		return m.wait(path, m.engine.files, interval)
 	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	select {
-	case <-m.coordinator.files:
+	case <-m.engine.files:
 		return false
 	case <-timer.C:
 		return true

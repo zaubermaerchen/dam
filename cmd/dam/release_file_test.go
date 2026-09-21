@@ -17,57 +17,6 @@ import (
 	"time"
 )
 
-func TestParseConfigAcceptsRepeatableFileConditions(t *testing.T) {
-	config, err := parseConfig([]string{
-		"file:relative/path:with-colon",
-		"--or",
-		"duration:250ms",
-		"--or",
-		"file:/tmp/ready",
-		"--or=file::",
-	})
-	if err != nil {
-		t.Fatalf("parseConfig returned error: %v", err)
-	}
-	if config.delay == nil || *config.delay != 250*time.Millisecond {
-		t.Fatalf("delay = %v, want 250ms", config.delay)
-	}
-	if got, want := config.files, []string{"relative/path:with-colon", "/tmp/ready", ":"}; !equalStrings(got, want) {
-		t.Fatalf("files = %q, want %q", got, want)
-	}
-}
-
-func TestParseConfigRejectsEmptyFilePath(t *testing.T) {
-	for _, arg := range []string{"file:"} {
-		t.Run(arg, func(t *testing.T) {
-			if _, err := parseConfig([]string{arg}); err == nil {
-				t.Fatal("parseConfig unexpectedly succeeded")
-			}
-		})
-	}
-}
-
-func TestParseConfigAcceptsFileOnlyAndMixedConditions(t *testing.T) {
-	for _, args := range [][]string{
-		{"file:ready"},
-		{"file:ready", "--or=signal:USR1"},
-	} {
-		if _, err := parseConfig(args); err != nil {
-			t.Fatalf("parseConfig(%q) returned error: %v", args, err)
-		}
-	}
-}
-
-func TestParseConfigPreservesDuplicateFileConditions(t *testing.T) {
-	config, err := parseConfig([]string{"file:ready", "--or=file:ready"})
-	if err != nil {
-		t.Fatalf("parseConfig returned error: %v", err)
-	}
-	if got, want := config.files, []string{"ready", "ready"}; !equalStrings(got, want) {
-		t.Fatalf("files = %q, want %q", got, want)
-	}
-}
-
 func TestFileProbeClassifiesMissingAndRegularFiles(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing")

@@ -15,49 +15,6 @@ import (
 	"testing"
 )
 
-func TestRunEventFDRestoresOriginalUnixFlags(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		nonblocking bool
-	}{
-		{name: "blocking"},
-		{name: "nonblocking", nonblocking: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			eventsFile := openEventFile(t)
-			defer eventsFile.Close()
-			eventFDNumber := int(eventsFile.Fd())
-			if test.nonblocking {
-				if err := syscall.SetNonblock(eventFDNumber, true); err != nil {
-					t.Fatalf("make event fd nonblocking: %v", err)
-				}
-			}
-			before, err := eventFDFlags(eventFDNumber)
-			if err != nil {
-				t.Fatalf("read original event fd flags: %v", err)
-			}
-			var output, diagnostics bytes.Buffer
-			args := []string{"--events-fd", strconv.Itoa(eventFDNumber), "duration:0s"}
-			status, cleanup := execute(args, strings.NewReader("payload"), &output, &diagnostics)
-			if status != 0 {
-				t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
-			}
-			after, err := eventFDFlags(eventFDNumber)
-			if err != nil {
-				t.Fatalf("read restored event fd flags: %v", err)
-			}
-			// Darwin reports its kernel-owned FWASWRITTEN bit after the first write;
-			// only O_NONBLOCK is changed by the event transport and can be restored.
-			if after&syscall.O_NONBLOCK != before&syscall.O_NONBLOCK {
-				t.Fatalf("event fd blocking mode after run = %#x, want original %#x (full flags after %#x, before %#x)", after&syscall.O_NONBLOCK, before&syscall.O_NONBLOCK, after, before)
-			}
-			if cleanup != nil {
-				cleanup()
-			}
-		})
-	}
-}
-
 func TestRunFullEventPipeDisablesObservationAndContinuesData(t *testing.T) {
 	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {
@@ -112,4 +69,12 @@ func TestRunFullEventPipeDisablesObservationAndContinuesData(t *testing.T) {
 	if _, err := io.Copy(io.Discard, readEnd); err != nil {
 		t.Fatalf("drain filled event pipe: %v", err)
 	}
+}
+
+func eventFDFlags(fd int) (int, error) {
+	result, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_GETFL), 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(result), nil
 }

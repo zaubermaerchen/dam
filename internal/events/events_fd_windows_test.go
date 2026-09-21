@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package events
 
 // This file verifies that Windows pipe mode changes are scoped to one write.
 

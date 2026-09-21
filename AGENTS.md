@@ -29,22 +29,21 @@
 ## リポジトリ構成
 
 - `cmd/dam/main.go`: version、遅延・注入 release ゲート、stdin/stdout 転送、終了コードを担当します。
-- `cmd/dam/cli_adapter.go`: `internal/cli` の validated plan を private runtime condition/group へ変換します。
+- `cmd/dam/cli_adapter.go`: `internal/cli` の validated plan を `internal/condition` の typed plan へ変換します。
+- `cmd/dam/release_gate.go`: root condition の成立を runtime の CLOSED → OPEN 遷移と公開 lifecycle event へ接続します。
 - `cmd/dam/events_adapter.go`: `internal/events` の platform capability を runtime tests へ接続します。
 - `cmd/dam/describe.go`: `--describe` の compact JSON schema、CLI/stream/state metadata、build-specific signal capability を担当します。
 - `internal/cli/`: argv、condition syntax、AND/OR groups、buffer/events-fd validation を担当します。
 - `internal/events/`: JSONL lifecycle event serialization、warn-once、descriptor duplication、OS別 transport を担当します。
-- `cmd/dam/release_file.go`: release coordinator と、cross-platform な file 条件の初回 probe、CLOSED 中の polling、OPEN / 空 stdin EOF での停止を担当します。
-- `cmd/dam/release_signal_unix.go`: Unix の SIGUSR1 / SIGUSR2 監視と、解放後も signal を捕捉し続けるライフサイクルを担当します。
-- `cmd/dam/release_signal_windows.go` / `cmd/dam/release_signal_unsupported.go`: file-only / duration / datetime / help / version のビルドを維持しつつ、未対応環境で signal を含む設定を拒否します。
+- `internal/condition/`: typed condition の AND/OR composition、latch/equivalence、duration/datetime/signal/file monitoring と lifecycle を担当します。
 - `cmd/dam/main_test.go`: 時刻、EOF、バイナリ保持、バックプレッシャー、解放後転送、実行時引数優先順位、I/O エラーの契約を固定します。
 - `internal/cli/cli_test.go` / `internal/cli/cli_contract_test.go`: 条件構文、AND/OR、datetime/DST、buffer-size、events-fd の parser 契約を固定します。
 - `internal/events/*_test.go`: JSONL serialization、warn-once、Unix FD flag / Windows pipe mode restoration を固定します。
-- `cmd/dam/release_file_test.go`: cross-platform な file parser / probe / polling、stat error と non-regular の retry、OPEN / 空 stdin EOF での monitor 停止を固定します。
+- `internal/condition/*_test.go`: AND/OR、equivalence、timing、file probe/polling、signal lifecycle、monitor 停止を固定します。
 - `cmd/dam/main_signal_unix_test.go`: プロセス分離した実 SIGUSR1 / SIGUSR2 配線と、解放後 signal の無害化を固定します。
 - `cmd/dam/main_signal_windows_test.go`: Windows で file-only を許可し、signal を含む設定を拒否する契約を固定します。
 - `.github/workflows/ci.yml`: Ubuntu、macOS、Windows で test/vet を実行し、Ubuntu で race test を実行します。
-- `.github/workflows/release.yml`: Linux、macOS、Windows の amd64/arm64 向け成果物を作成します。
+- `.github/workflows/release.yml`: Linux、macOS、Windows の amd64/arm64 と Linux armv6 向け成果物を作成します。
 
 release workflow は `main.version` を注入してビルドし、Linux amd64 の成果物で `dam --version` の出力を確認します。
 

@@ -9,6 +9,7 @@ on:
       - "LICENSE"
       - "README.md"
       - "cmd/**"
+      - "internal/**"
   push:
     tags:
       - "v*"

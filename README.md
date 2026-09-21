@@ -112,6 +112,13 @@ failures print one `events disabled: ...` warning and do not interrupt the
 primary stream. The descriptor remains owned by the caller.
 
 ```bash
+producer | dam duration:3s --events-fd 3 3>events.jsonl | consumer
+```
+
+The pipeline data still flows only through stdout; `events.jsonl` receives the
+optional observation records.
+
+```bash
 printf 'hello' | ./dam duration:3s
 ```
 
@@ -167,6 +174,10 @@ the first stdout write, then the held bytes draining and
 the automatic `buffered-eof-complete` or `buffered-error-complete` finishing
 the already-observed terminal result without an additional EOF, error, or
 external event. `--describe` does not claim an event-FD interface.
+
+```bash
+dam --describe | jq .
+```
 
 `-h` and `--help` are equivalent. An exact help argument takes precedence over
 all other arguments, prints the help text to stdout, and exits successfully

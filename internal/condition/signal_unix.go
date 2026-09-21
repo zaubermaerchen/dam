@@ -1,6 +1,6 @@
 //go:build aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
 
-package main
+package condition
 
 // This file wires the supported Unix signals to a one-way release event while
 // continuing to consume later occurrences until the command exits.
@@ -15,43 +15,43 @@ import (
 )
 
 type releaseMonitor struct {
-	release     chan struct{}
-	done        chan struct{}
-	stop        sync.Once
-	signals     chan os.Signal
-	coordinator *releaseCoordinator
+	release chan struct{}
+	done    chan struct{}
+	stop    sync.Once
+	signals chan os.Signal
+	engine  *Engine
 }
 
 func signalReleaseSupported() bool { return true }
 
-func newReleaseMonitor(configured []string, coordinators ...*releaseCoordinator) (*releaseMonitor, error) {
-	if len(coordinators) > 1 {
-		return nil, fmt.Errorf("multiple release coordinators are not supported")
+func newReleaseMonitor(configured []string, engines ...*Engine) (*releaseMonitor, error) {
+	if len(engines) > 1 {
+		return nil, fmt.Errorf("multiple release engines are not supported")
 	}
-	var coordinator *releaseCoordinator
-	if len(coordinators) == 1 {
-		coordinator = coordinators[0]
+	var engine *Engine
+	if len(engines) == 1 {
+		engine = engines[0]
 	}
-	return newReleaseMonitorWithCoordinator(configured, coordinator)
+	return newReleaseMonitorWithEngine(configured, engine)
 }
 
-func newReleaseMonitorWithCoordinator(configured []string, coordinator *releaseCoordinator) (*releaseMonitor, error) {
+func newReleaseMonitorWithEngine(configured []string, engine *Engine) (*releaseMonitor, error) {
 	effectiveSignals, err := resolveReleaseSignals(configured)
 	if err != nil {
 		return nil, err
 	}
-	if coordinator == nil && len(effectiveSignals) == 0 {
+	if engine == nil && len(effectiveSignals) == 0 {
 		return &releaseMonitor{}, nil
 	}
-	if coordinator == nil {
-		coordinator = newReleaseCoordinator(false)
+	if engine == nil {
+		engine = newEngine(false)
 	}
 
 	monitor := &releaseMonitor{
-		release:     coordinator.release,
-		done:        make(chan struct{}),
-		signals:     make(chan os.Signal, len(effectiveSignals)),
-		coordinator: coordinator,
+		release: engine.release,
+		done:    make(chan struct{}),
+		signals: make(chan os.Signal, len(effectiveSignals)),
+		engine:  engine,
 	}
 	if len(effectiveSignals) > 0 {
 		signal.Notify(monitor.signals, effectiveSignals...)
@@ -83,7 +83,7 @@ func (monitor *releaseMonitor) consumeSignals() {
 	for {
 		select {
 		case received := <-monitor.signals:
-			_ = monitor.coordinator.satisfySignal(canonicalReleaseSignal(received))
+			_ = monitor.engine.satisfySignal(canonicalReleaseSignal(received))
 		case <-monitor.done:
 			return
 		}
@@ -106,10 +106,10 @@ func (monitor *releaseMonitor) Release() <-chan struct{} {
 }
 
 func (monitor *releaseMonitor) Failures() <-chan error {
-	if monitor.coordinator == nil {
+	if monitor.engine == nil {
 		return nil
 	}
-	return monitor.coordinator.fatal
+	return monitor.engine.fatal
 }
 
 func (monitor *releaseMonitor) Close() {
@@ -120,8 +120,8 @@ func (monitor *releaseMonitor) Close() {
 		if monitor.signals != nil {
 			signal.Stop(monitor.signals)
 		}
-		if monitor.coordinator != nil {
-			monitor.coordinator.stopFiles()
+		if monitor.engine != nil {
+			monitor.engine.stopFiles()
 		}
 	})
 }

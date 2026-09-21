@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -304,33 +303,6 @@ func TestRunSignalSubprocessDoesNotReleaseOnUnconfiguredUSRSignal(t *testing.T) 
 			}
 			helper.finish(t)
 		})
-	}
-}
-
-func TestReleaseMonitorResolvesAndDeduplicatesConfiguredSignals(t *testing.T) {
-	signals, err := resolveReleaseSignals([]string{"SIGUSR2", "SIGUSR1", "SIGUSR2"})
-	if err != nil {
-		t.Fatalf("resolveReleaseSignals returned error: %v", err)
-	}
-	if got, want := signals, []os.Signal{syscall.SIGUSR2, syscall.SIGUSR1}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("signals = %v, want %v", got, want)
-	}
-}
-
-func TestReleaseMonitorRejectsUnknownCanonicalSignal(t *testing.T) {
-	if _, err := resolveReleaseSignals([]string{"SIGUSR3"}); err == nil {
-		t.Fatal("resolveReleaseSignals unexpectedly succeeded")
-	}
-}
-
-func TestReleaseMonitorUsesUniqueSignalCapacity(t *testing.T) {
-	monitor, err := newReleaseMonitor([]string{"SIGUSR2", "SIGUSR1", "SIGUSR2"})
-	if err != nil {
-		t.Fatalf("newReleaseMonitor returned error: %v", err)
-	}
-	t.Cleanup(monitor.Close)
-	if got, want := cap(monitor.signals), 2; got != want {
-		t.Fatalf("signal channel capacity = %d, want %d", got, want)
 	}
 }
 

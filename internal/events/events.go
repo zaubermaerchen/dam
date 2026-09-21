@@ -18,11 +18,12 @@ type eventFD interface {
 // Sink emits release-selected and stream-open exactly once, while isolating
 // transport failures from the primary stdin/stdout data path.
 type Sink struct {
-	mu          sync.Mutex
-	writer      eventFD
-	diagnostics io.Writer
-	disabled    bool
-	dispatched  bool
+	mu              sync.Mutex
+	writer          eventFD
+	diagnostics     io.Writer
+	disabled        bool
+	releaseSelected bool
+	streamOpen      bool
 }
 
 // New opens a duplicate of fd for event output. The caller retains ownership
@@ -42,24 +43,44 @@ func New(fd *int, diagnostics io.Writer) *Sink {
 	return sink
 }
 
-// EmitOpen reports both externally visible OPEN transitions in order. Writes
-// are nonblocking so the observation sink cannot stall the data plane.
-func (sink *Sink) EmitOpen() {
+// EmitReleaseSelected reports the condition root selection. Writes are
+// nonblocking so the observation sink cannot stall the data plane.
+func (sink *Sink) EmitReleaseSelected() {
 	if sink == nil {
 		return
 	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if sink.disabled || sink.dispatched {
+	if sink.disabled || sink.releaseSelected {
 		return
 	}
-	sink.dispatched = true
-	if !sink.writeEventLocked("release-selected") {
+	sink.releaseSelected = true
+	sink.writeEventLocked("release-selected")
+}
+
+// EmitStreamOpen reports the runtime gate's OPEN commit after
+// EmitReleaseSelected. A disabled sink remains harmless to the data plane.
+func (sink *Sink) EmitStreamOpen() {
+	if sink == nil {
 		return
 	}
-	if !sink.writeEventLocked("stream-open") {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.disabled || sink.streamOpen {
 		return
 	}
+	sink.streamOpen = true
+	sink.writeEventLocked("stream-open")
+}
+
+// EmitOpen preserves the original convenience API for callers that do not
+// need to observe the runtime gate between the two transitions.
+func (sink *Sink) EmitOpen() {
+	if sink == nil {
+		return
+	}
+	sink.EmitReleaseSelected()
+	sink.EmitStreamOpen()
 }
 
 func (sink *Sink) writeEventLocked(name string) bool {

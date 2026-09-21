@@ -10,7 +10,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -188,35 +187,6 @@ func TestRunDisablesBrokenEventFDOnceAndContinues(t *testing.T) {
 	}
 	if got := strings.Count(diagnostics.String(), "events disabled:"); got != 1 {
 		t.Fatalf("events-disabled warning count = %d, want 1: %q", got, diagnostics.String())
-	}
-}
-
-func TestReleaseCoordinatorOpenAndEmptyAreLinearized(t *testing.T) {
-	group := releaseGroup{members: []releaseCondition{newDurationReleaseCondition(0)}}
-	closed := newReleaseCoordinatorWithGroups(false, []releaseGroup{group})
-	var closedHooks atomic.Int32
-	closed.setReleaseHook(func() { closedHooks.Add(1) })
-	if err := closed.completeEmpty(); err != nil {
-		t.Fatalf("completeEmpty returned error: %v", err)
-	}
-	if err := closed.satisfyDuration(0); err != nil {
-		t.Fatalf("satisfyDuration after empty returned error: %v", err)
-	}
-	if got := closedHooks.Load(); got != 0 {
-		t.Fatalf("hooks after empty completion = %d, want 0", got)
-	}
-
-	opened := newReleaseCoordinatorWithGroups(false, []releaseGroup{group})
-	var openedHooks atomic.Int32
-	opened.setReleaseHook(func() { openedHooks.Add(1) })
-	if err := opened.satisfyDuration(0); err != nil {
-		t.Fatalf("satisfyDuration returned error: %v", err)
-	}
-	if err := opened.completeEmpty(); err != nil {
-		t.Fatalf("completeEmpty after open returned error: %v", err)
-	}
-	if got := openedHooks.Load(); got != 1 {
-		t.Fatalf("hooks after open completion = %d, want 1", got)
 	}
 }
 

@@ -119,7 +119,7 @@ The pipeline data still flows only through stdout; `events.jsonl` receives the
 optional observation records.
 
 ```bash
-printf 'hello' | ./dam duration:3s
+printf 'hello' | dam duration:3s
 ```
 
 At least one condition is required. Conditions and `--buffer-size` may appear

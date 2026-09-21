@@ -1,7 +1,6 @@
-package main
+package events
 
-// This file emits the two public release lifecycle events and keeps event
-// transport failures isolated from the primary stdin-to-stdout data path.
+// Package events writes dam's optional JSONL release lifecycle observations.
 
 import (
 	"encoding/json"
@@ -16,7 +15,9 @@ type eventFD interface {
 	Close() error
 }
 
-type eventSink struct {
+// Sink emits release-selected and stream-open exactly once, while isolating
+// transport failures from the primary stdin/stdout data path.
+type Sink struct {
 	mu          sync.Mutex
 	writer      eventFD
 	diagnostics io.Writer
@@ -24,11 +25,14 @@ type eventSink struct {
 	dispatched  bool
 }
 
-func newEventSink(fd *int, diagnostics io.Writer) *eventSink {
+// New opens a duplicate of fd for event output. The caller retains ownership
+// of fd; setup failures are reported once through diagnostics and disable the
+// optional observation stream.
+func New(fd *int, diagnostics io.Writer) *Sink {
 	if fd == nil {
 		return nil
 	}
-	sink := &eventSink{diagnostics: diagnostics}
+	sink := &Sink{diagnostics: diagnostics}
 	writer, err := openEventFD(*fd)
 	if err != nil {
 		sink.disableLocked(err)
@@ -38,11 +42,9 @@ func newEventSink(fd *int, diagnostics io.Writer) *eventSink {
 	return sink
 }
 
-// emitOpen reports both externally visible OPEN transitions while the
-// coordinator still owns the transition. The event transport is nonblocking,
-// so downstream readers cannot observe release before these records are
-// dispatched.
-func (sink *eventSink) emitOpen() {
+// EmitOpen reports both externally visible OPEN transitions in order. Writes
+// are nonblocking so the observation sink cannot stall the data plane.
+func (sink *Sink) EmitOpen() {
 	if sink == nil {
 		return
 	}
@@ -60,7 +62,7 @@ func (sink *eventSink) emitOpen() {
 	}
 }
 
-func (sink *eventSink) writeEventLocked(name string) bool {
+func (sink *Sink) writeEventLocked(name string) bool {
 	if sink.writer == nil || sink.disabled {
 		return false
 	}
@@ -87,7 +89,7 @@ func (sink *eventSink) writeEventLocked(name string) bool {
 	return true
 }
 
-func (sink *eventSink) disableLocked(err error) {
+func (sink *Sink) disableLocked(err error) {
 	if sink.disabled {
 		return
 	}
@@ -101,7 +103,8 @@ func (sink *eventSink) disableLocked(err error) {
 	}
 }
 
-func (sink *eventSink) Close() {
+// Close stops event output and releases the duplicate descriptor.
+func (sink *Sink) Close() {
 	if sink == nil {
 		return
 	}

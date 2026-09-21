@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package events
 
 // This file duplicates Windows event handles so dam never owns the caller's
 // descriptor. Named-pipe handles are switched to NOWAIT only during writes.
@@ -28,7 +28,8 @@ type windowsEventFD struct {
 	writeData   func([]byte) (int, error)
 }
 
-func eventFDSupported() bool { return true }
+// Supported reports whether this target has an event-FD transport.
+func Supported() bool { return true }
 
 func openEventFD(fd int) (eventFD, error) {
 	process, err := syscall.GetCurrentProcess()

@@ -1,10 +1,9 @@
 //go:build aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
 
-package main
+package events
 
 // This file duplicates Unix event descriptors and applies nonblocking mode
-// only around each write so an observation sink cannot stall the data plane or
-// leave the caller's open file description changed.
+// only around each write so the caller's open file description is preserved.
 
 import (
 	"os"
@@ -16,7 +15,8 @@ type unixEventFD struct {
 	fd   int
 }
 
-func eventFDSupported() bool { return true }
+// Supported reports whether this target has an event-FD transport.
+func Supported() bool { return true }
 
 func openEventFD(fd int) (eventFD, error) {
 	duplicate, err := syscall.Dup(fd)
@@ -45,9 +45,8 @@ func (fd *unixEventFD) Write(data []byte) (written int, err error) {
 	return syscall.Write(fd.fd, data)
 }
 
-// setEventFDNonblock changes only the mode bit owned by this writer. In
-// particular, restoring the complete F_GETFL result would ask the kernel to
-// restore status bits such as Darwin's write marker that are not settable.
+// setEventFDNonblock changes only the mode bit owned by this writer. Restoring
+// the complete F_GETFL result would also attempt to write kernel-owned bits.
 func setEventFDNonblock(fd int, nonblocking bool) error {
 	flags, err := eventFDFlags(fd)
 	if err != nil {

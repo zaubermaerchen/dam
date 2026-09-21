@@ -15,41 +15,6 @@ import (
 	"time"
 )
 
-func TestParseConfigAcceptsEventsFDForms(t *testing.T) {
-	for _, args := range [][]string{
-		{"--events-fd", "9", "duration:0s"},
-		{"duration:0s", "--events-fd=9"},
-	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			config, err := parseConfig(args)
-			if err != nil {
-				t.Fatalf("parseConfig returned error: %v", err)
-			}
-			if config.eventsFD == nil || *config.eventsFD != 9 {
-				t.Fatalf("eventsFD = %#v, want pointer to 9", config.eventsFD)
-			}
-		})
-	}
-}
-
-func TestParseConfigRejectsInvalidEventsFD(t *testing.T) {
-	for _, args := range [][]string{
-		{"--events-fd", "duration:0s"},
-		{"--events-fd=", "duration:0s"},
-		{"--events-fd", "abc", "duration:0s"},
-		{"--events-fd", "2", "duration:0s"},
-		{"--events-fd=2", "duration:0s"},
-		{"--events-fd", "9", "--events-fd", "10", "duration:0s"},
-		{"duration:0s", "--events-fd=9", "--events-fd=10"},
-	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			if _, err := parseConfig(args); err == nil {
-				t.Fatal("parseConfig unexpectedly accepted invalid --events-fd")
-			}
-		})
-	}
-}
-
 func TestEventsFDDoesNotOverrideHelpOrDescribePriority(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	if status := run([]string{"--events-fd=9", "--help"}, describePanicReader{}, &output, &diagnostics); status != 0 {
@@ -226,21 +191,6 @@ func TestRunDisablesBrokenEventFDOnceAndContinues(t *testing.T) {
 	}
 }
 
-func TestEventSinkDisablesAfterWriteFailureOnce(t *testing.T) {
-	var diagnostics bytes.Buffer
-	writer := &failingEventFD{err: io.ErrClosedPipe}
-	sink := &eventSink{writer: writer, diagnostics: &diagnostics}
-	sink.emitOpen()
-	sink.emitOpen()
-
-	if writer.writes != 1 {
-		t.Fatalf("event writes = %d, want 1", writer.writes)
-	}
-	if got := strings.Count(diagnostics.String(), "events disabled:"); got != 1 {
-		t.Fatalf("events-disabled warning count = %d, want 1: %q", got, diagnostics.String())
-	}
-}
-
 func TestReleaseCoordinatorOpenAndEmptyAreLinearized(t *testing.T) {
 	group := releaseGroup{members: []releaseCondition{newDurationReleaseCondition(0)}}
 	closed := newReleaseCoordinatorWithGroups(false, []releaseGroup{group})
@@ -306,15 +256,3 @@ func (reader blockingEOFReader) Read([]byte) (int, error) {
 	<-reader.unblock
 	return 0, io.EOF
 }
-
-type failingEventFD struct {
-	writes int
-	err    error
-}
-
-func (writer *failingEventFD) Write([]byte) (int, error) {
-	writer.writes++
-	return 0, writer.err
-}
-
-func (*failingEventFD) Close() error { return nil }

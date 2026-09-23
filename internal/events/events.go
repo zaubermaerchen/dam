@@ -27,20 +27,16 @@ type Sink struct {
 }
 
 // New opens a duplicate of fd for event output. The caller retains ownership
-// of fd; setup failures are reported once through diagnostics and disable the
-// optional observation stream.
-func New(fd *int, diagnostics io.Writer) *Sink {
+// of fd; an unusable descriptor is a configuration error before input starts.
+func New(fd *int, diagnostics io.Writer) (*Sink, error) {
 	if fd == nil {
-		return nil
+		return nil, nil
 	}
-	sink := &Sink{diagnostics: diagnostics}
 	writer, err := openEventFD(*fd)
 	if err != nil {
-		sink.disableLocked(err)
-		return sink
+		return nil, fmt.Errorf("invalid --events-fd %d: %w", *fd, err)
 	}
-	sink.writer = writer
-	return sink
+	return &Sink{writer: writer, diagnostics: diagnostics}, nil
 }
 
 // EmitReleaseSelected reports the condition root selection. Writes are
@@ -120,7 +116,11 @@ func (sink *Sink) disableLocked(err error) {
 		sink.writer = nil
 	}
 	if err != nil && sink.diagnostics != nil {
-		_, _ = fmt.Fprintf(sink.diagnostics, "events disabled: %v\n", err)
+		// A full or blocked stderr must not hold the gate's event lock or the
+		// primary data path. Warning delivery is best effort.
+		diagnostics := sink.diagnostics
+		warning := fmt.Sprintf("events disabled: %v\n", err)
+		go func() { _, _ = io.WriteString(diagnostics, warning) }()
 	}
 }
 

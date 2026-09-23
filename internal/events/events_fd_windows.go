@@ -2,8 +2,8 @@
 
 package events
 
-// This file duplicates Windows event handles so dam never owns the caller's
-// descriptor. Named-pipe handles are switched to NOWAIT only during writes.
+// This file accepts only verifiably NOWAIT Windows pipes and duplicates their
+// handles without changing the caller's pipe mode.
 
 import (
 	"os"
@@ -11,20 +11,20 @@ import (
 	"unsafe"
 )
 
-const pipeNowait = 1
+const (
+	pipeNowait    = 1
+	fileWriteData = 0x0002
+)
 
 var (
 	kernel32                         = syscall.NewLazyDLL("kernel32.dll")
 	getNamedPipeHandleStateProcedure = kernel32.NewProc("GetNamedPipeHandleStateW")
-	setNamedPipeHandleStateProcedure = kernel32.NewProc("SetNamedPipeHandleState")
 )
 
 type windowsEventFD struct {
 	file        *os.File
 	handle      syscall.Handle
-	pipe        bool
 	getPipeMode func() (uint32, error)
-	setPipeMode func(uint32) error
 	writeData   func([]byte) (int, error)
 }
 
@@ -32,6 +32,12 @@ type windowsEventFD struct {
 func Supported() bool { return true }
 
 func openEventFD(fd int) (eventFD, error) {
+	if err := validateWindowsEventFD(syscall.Handle(fd)); err != nil {
+		return nil, err
+	}
+	if err := checkWindowsPipeWritable(syscall.Handle(fd)); err != nil {
+		return nil, err
+	}
 	process, err := syscall.GetCurrentProcess()
 	if err != nil {
 		return nil, err
@@ -44,53 +50,57 @@ func openEventFD(fd int) (eventFD, error) {
 	event.writeData = func(data []byte) (int, error) {
 		return event.file.Write(data)
 	}
-	if fileType, typeErr := syscall.GetFileType(duplicate); typeErr == nil && fileType == syscall.FILE_TYPE_PIPE {
-		if _, err := getWindowsPipeMode(duplicate); err != nil {
-			event.Close()
-			return nil, err
-		}
-		event.pipe = true
-		event.getPipeMode = func() (uint32, error) {
-			return getWindowsPipeMode(duplicate)
-		}
-		event.setPipeMode = func(mode uint32) error {
-			return setWindowsPipeMode(duplicate, &mode)
-		}
-	}
 	return event, nil
 }
 
-func (fd *windowsEventFD) Write(data []byte) (written int, err error) {
-	if !fd.pipe {
-		return fd.write(data)
+// Duplicating with FILE_WRITE_DATA tests the handle's granted rights without
+// sending a byte into the pipe; the narrow duplicate is closed immediately.
+func checkWindowsPipeWritable(handle syscall.Handle) error {
+	process, err := syscall.GetCurrentProcess()
+	if err != nil {
+		return err
 	}
+	var duplicate syscall.Handle
+	if err := syscall.DuplicateHandle(process, handle, process, &duplicate, fileWriteData, false, 0); err != nil {
+		return err
+	}
+	return syscall.CloseHandle(duplicate)
+}
+
+func (fd *windowsEventFD) Write(data []byte) (written int, err error) {
 	getMode := fd.getPipeMode
 	if getMode == nil {
-		getMode = func() (uint32, error) {
-			return getWindowsPipeMode(fd.handle)
+		if err := validateWindowsEventFD(fd.handle); err != nil {
+			return 0, err
+		}
+	} else {
+		mode, err := getMode()
+		if err != nil {
+			return 0, err
+		}
+		if mode&pipeNowait == 0 {
+			return 0, syscall.EINVAL
 		}
 	}
-	setMode := fd.setPipeMode
-	if setMode == nil {
-		setMode = func(mode uint32) error {
-			return setWindowsPipeMode(fd.handle, &mode)
-		}
-	}
-	currentMode, err := getMode()
-	if err != nil {
-		return 0, err
-	}
-	nowait := currentMode | pipeNowait
-	if err := setMode(nowait); err != nil {
-		_ = setMode(currentMode)
-		return 0, err
-	}
-	defer func() {
-		if restoreErr := setMode(currentMode); err == nil && restoreErr != nil {
-			err = restoreErr
-		}
-	}()
 	return fd.write(data)
+}
+
+func validateWindowsEventFD(handle syscall.Handle) error {
+	fileType, err := syscall.GetFileType(handle)
+	if err != nil {
+		return err
+	}
+	if fileType != syscall.FILE_TYPE_PIPE {
+		return syscall.EINVAL
+	}
+	mode, err := getWindowsPipeMode(handle)
+	if err != nil {
+		return err
+	}
+	if mode&pipeNowait == 0 {
+		return syscall.EINVAL
+	}
+	return nil
 }
 
 func (fd *windowsEventFD) write(data []byte) (int, error) {
@@ -119,15 +129,4 @@ func getWindowsPipeMode(handle syscall.Handle) (uint32, error) {
 		return 0, syscall.EINVAL
 	}
 	return mode, nil
-}
-
-func setWindowsPipeMode(handle syscall.Handle, mode *uint32) error {
-	result, _, callErr := setNamedPipeHandleStateProcedure.Call(uintptr(handle), uintptr(unsafe.Pointer(mode)), 0, 0)
-	if result == 0 {
-		if callErr != syscall.Errno(0) {
-			return callErr
-		}
-		return syscall.EINVAL
-	}
-	return nil
 }

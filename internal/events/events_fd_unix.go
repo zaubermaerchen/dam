@@ -2,10 +2,11 @@
 
 package events
 
-// This file duplicates Unix event descriptors and applies nonblocking mode
-// only around each write so the caller's open file description is preserved.
+// This file accepts only already-nonblocking Unix pipes and sockets so event
+// writes never change the caller's shared open file description.
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 )
@@ -19,6 +20,9 @@ type unixEventFD struct {
 func Supported() bool { return true }
 
 func openEventFD(fd int) (eventFD, error) {
+	if err := validateUnixEventFD(fd); err != nil {
+		return nil, err
+	}
 	duplicate, err := syscall.Dup(fd)
 	if err != nil {
 		return nil, err
@@ -28,39 +32,31 @@ func openEventFD(fd int) (eventFD, error) {
 }
 
 func (fd *unixEventFD) Write(data []byte) (written int, err error) {
-	originalFlags, err := eventFDFlags(fd.fd)
-	if err != nil {
+	if err := validateUnixEventFD(fd.fd); err != nil {
 		return 0, err
 	}
-	originalNonblock := originalFlags&syscall.O_NONBLOCK != 0
-	if err := setEventFDNonblock(fd.fd, true); err != nil {
-		_ = setEventFDNonblock(fd.fd, originalNonblock)
-		return 0, err
-	}
-	defer func() {
-		if restoreErr := setEventFDNonblock(fd.fd, originalNonblock); err == nil && restoreErr != nil {
-			err = restoreErr
-		}
-	}()
 	return syscall.Write(fd.fd, data)
 }
 
-// setEventFDNonblock changes only the mode bit owned by this writer. Restoring
-// the complete F_GETFL result would also attempt to write kernel-owned bits.
-func setEventFDNonblock(fd int, nonblocking bool) error {
+func validateUnixEventFD(fd int) error {
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if kind := stat.Mode & syscall.S_IFMT; kind != syscall.S_IFIFO && kind != syscall.S_IFSOCK {
+		return fmt.Errorf("event fd must be a pipe, FIFO, or socket")
+	}
 	flags, err := eventFDFlags(fd)
 	if err != nil {
 		return err
 	}
-	if (flags&syscall.O_NONBLOCK != 0) == nonblocking {
-		return nil
+	if flags&syscall.O_ACCMODE == syscall.O_RDONLY {
+		return fmt.Errorf("event fd must be writable")
 	}
-	if nonblocking {
-		flags |= syscall.O_NONBLOCK
-	} else {
-		flags &^= syscall.O_NONBLOCK
+	if flags&syscall.O_NONBLOCK == 0 {
+		return fmt.Errorf("event fd must already be nonblocking")
 	}
-	return setEventFDFlags(fd, flags)
+	return nil
 }
 
 func (fd *unixEventFD) Close() error {
@@ -78,12 +74,4 @@ func eventFDFlags(fd int) (int, error) {
 		return 0, errno
 	}
 	return int(result), nil
-}
-
-func setEventFDFlags(fd, flags int) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_SETFL), uintptr(flags))
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }

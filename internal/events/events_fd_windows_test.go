@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -30,8 +31,8 @@ func TestWindowsEventFDWriteRequiresCurrentNowaitMode(t *testing.T) {
 		t.Fatalf("NOWAIT Write = (%d, %v), want (5, nil)", n, err)
 	}
 	mode = 0
-	if _, err := fd.Write([]byte("event")); !errors.Is(err, syscall.EINVAL) {
-		t.Fatalf("blocking Write error = %v, want EINVAL", err)
+	if _, err := fd.Write([]byte("event")); !errors.Is(err, syscall.EINVAL) || err.Error() != fmt.Sprintf("event fd must already be PIPE_NOWAIT: %v", syscall.EINVAL) {
+		t.Fatalf("blocking Write error = %v, want descriptive EINVAL", err)
 	}
 	if writes != 1 {
 		t.Fatalf("writes = %d, want 1", writes)
@@ -44,9 +45,28 @@ func TestWindowsEventFDRejectsRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if writer, err := openEventFD(int(file.Fd())); err == nil {
-		writer.Close()
+	fd := int(file.Fd())
+	if sink, err := New(&fd, io.Discard); err == nil {
+		sink.Close()
 		t.Fatal("regular file unexpectedly accepted")
+	} else if want := fmt.Sprintf("invalid --events-fd %d: event fd must be a pipe: %v", fd, syscall.EINVAL); !errors.Is(err, syscall.EINVAL) || err.Error() != want {
+		t.Fatalf("regular file error = %v, want %q", err, want)
+	}
+}
+
+func TestWindowsEventFDRejectsBlockingPipeWithReason(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readEnd.Close()
+	defer writeEnd.Close()
+	fd := int(writeEnd.Fd())
+	if sink, err := New(&fd, io.Discard); err == nil {
+		sink.Close()
+		t.Fatal("blocking pipe unexpectedly accepted")
+	} else if want := fmt.Sprintf("invalid --events-fd %d: event fd must already be PIPE_NOWAIT: %v", fd, syscall.EINVAL); !errors.Is(err, syscall.EINVAL) || err.Error() != want {
+		t.Fatalf("blocking pipe error = %v, want %q", err, want)
 	}
 }
 

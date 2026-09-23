@@ -6,6 +6,7 @@ package events
 // handles without changing the caller's pipe mode.
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 	"unsafe"
@@ -79,7 +80,7 @@ func (fd *windowsEventFD) Write(data []byte) (written int, err error) {
 			return 0, err
 		}
 		if mode&pipeNowait == 0 {
-			return 0, syscall.EINVAL
+			return 0, fmt.Errorf("event fd must already be PIPE_NOWAIT: %w", syscall.EINVAL)
 		}
 	}
 	return fd.write(data)
@@ -91,14 +92,14 @@ func validateWindowsEventFD(handle syscall.Handle) error {
 		return err
 	}
 	if fileType != syscall.FILE_TYPE_PIPE {
-		return syscall.EINVAL
+		return fmt.Errorf("event fd must be a pipe: %w", syscall.EINVAL)
 	}
 	mode, err := getWindowsPipeMode(handle)
 	if err != nil {
 		return err
 	}
 	if mode&pipeNowait == 0 {
-		return syscall.EINVAL
+		return fmt.Errorf("event fd must already be PIPE_NOWAIT: %w", syscall.EINVAL)
 	}
 	return nil
 }

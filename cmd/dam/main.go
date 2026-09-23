@@ -61,9 +61,10 @@ Options:
         Also accepted as --buffer-size=SIZE.
 
   --events-fd N
-        Emit release-selected and stream-open JSONL events to file descriptor N.
-        Also accepted as --events-fd=N. Event transport failures disable events
-        with one warning while the primary stream continues.
+        Emit release-selected and stream-open JSONL events to an already
+        nonblocking pipe, FIFO, or socket descriptor N (Windows: NOWAIT pipe).
+        Also accepted as --events-fd=N. Invalid descriptors fail at startup;
+        later transport failures disable events and attempt one warning.
 
 Notes:
         Equivalent duration values and resolved datetime values share one
@@ -184,7 +185,11 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 		writeDiagnostic(diagnostics, err)
 		return 1, nil
 	}
-	eventSink := events.New(config.eventsFD, diagnostics)
+	eventSink, err := events.New(config.eventsFD, diagnostics)
+	if err != nil {
+		writeDiagnostic(diagnostics, err)
+		return 2, nil
+	}
 
 	engine, err := condition.New(config.conditionPlan(), condition.Options{
 		Now:      clock.now,
@@ -192,6 +197,7 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 	})
 	if err != nil {
 		writeDiagnostic(diagnostics, err)
+		eventSink.Close()
 		return 1, nil
 	}
 	gate := newReleaseGate(engine, eventSink)

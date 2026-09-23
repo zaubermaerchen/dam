@@ -1,3 +1,5 @@
+//go:build aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
+
 package main
 
 // This file verifies the optional runtime event interface without coupling
@@ -10,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -96,7 +99,10 @@ func TestRunFileAndGroupEmitsOneOpenTransition(t *testing.T) {
 	}
 	eventsFile := openEventFile(t)
 	defer eventsFile.Close()
-	readyFile := openEventFile(t)
+	readyFile, err := os.CreateTemp(t.TempDir(), "dam-ready-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	readyPath := readyFile.Name()
 	if err := readyFile.Close(); err != nil {
 		t.Fatalf("close ready file: %v", err)
@@ -151,15 +157,7 @@ func TestRunStartupReleaseReportsBothEventsBeforeInput(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("run did not start its input read")
 	}
-	separate, err := os.Open(eventsFile.Name())
-	if err != nil {
-		t.Fatalf("open event file for observation: %v", err)
-	}
-	contents, err := io.ReadAll(separate)
-	_ = separate.Close()
-	if err != nil {
-		t.Fatalf("read event file before input completion: %v", err)
-	}
+	contents := readEventFile(t, eventsFile)
 	if got, want := strings.Count(string(contents), `"event":"release-selected"`), 1; got != want {
 		t.Fatalf("release-selected count before input completion = %d, want %d: %q", got, want, contents)
 	}
@@ -177,41 +175,72 @@ func TestRunStartupReleaseReportsBothEventsBeforeInput(t *testing.T) {
 	}
 }
 
-func TestRunDisablesBrokenEventFDOnceAndContinues(t *testing.T) {
+func TestRunRejectsBrokenEventFDBeforeInput(t *testing.T) {
 	var output, diagnostics bytes.Buffer
-	if status := run([]string{"--events-fd=999999", "duration:0s"}, strings.NewReader("payload"), &output, &diagnostics); status != 0 {
-		t.Fatalf("run status = %d, diagnostics = %q", status, diagnostics.String())
+	if status := run([]string{"--events-fd=999999", "duration:0s"}, describePanicReader{}, &output, &diagnostics); status != 2 {
+		t.Fatalf("run status = %d, want 2; diagnostics = %q", status, diagnostics.String())
 	}
-	if got, want := output.String(), "payload"; got != want {
-		t.Fatalf("output = %q, want %q", got, want)
+	if output.Len() != 0 {
+		t.Fatalf("output = %q, want empty", output.String())
 	}
-	if got := strings.Count(diagnostics.String(), "events disabled:"); got != 1 {
-		t.Fatalf("events-disabled warning count = %d, want 1: %q", got, diagnostics.String())
+	if !strings.Contains(diagnostics.String(), "invalid --events-fd") {
+		t.Fatalf("diagnostics = %q, want invalid event fd", diagnostics.String())
 	}
 }
 
-func openEventFile(t *testing.T) *os.File {
+type eventTestPipe struct {
+	readEnd, writeEnd *os.File
+	readFD, writeFD   int
+}
+
+func openEventFile(t *testing.T) *eventTestPipe {
 	t.Helper()
-	file, err := os.CreateTemp(t.TempDir(), "dam-events-")
+	readEnd, file, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("create event file: %v", err)
+		t.Fatalf("create event pipe: %v", err)
 	}
 	fd := file.Fd()
 	if fd < 3 {
 		file.Close()
+		readEnd.Close()
 		t.Skipf("event file received reserved fd %d", fd)
 	}
-	return file
+	if err := syscall.SetNonblock(int(fd), true); err != nil {
+		file.Close()
+		readEnd.Close()
+		t.Fatalf("make event pipe nonblocking: %v", err)
+	}
+	readFD := int(readEnd.Fd())
+	if err := syscall.SetNonblock(readFD, true); err != nil {
+		file.Close()
+		readEnd.Close()
+		t.Fatalf("make event pipe reader nonblocking: %v", err)
+	}
+	return &eventTestPipe{readEnd: readEnd, writeEnd: file, readFD: readFD, writeFD: int(fd)}
 }
 
-func readEventFile(t *testing.T, file *os.File) string {
+func (pipe *eventTestPipe) Fd() uintptr { return uintptr(pipe.writeFD) }
+
+func (pipe *eventTestPipe) Close() {
+	_ = pipe.writeEnd.Close()
+	_ = pipe.readEnd.Close()
+}
+
+func readEventFile(t *testing.T, pipe *eventTestPipe) string {
 	t.Helper()
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		t.Fatalf("seek event file: %v", err)
-	}
-	contents, err := io.ReadAll(file)
-	if err != nil {
-		t.Fatalf("read event file: %v", err)
+	var contents []byte
+	buffer := make([]byte, 4096)
+	for {
+		n, err := syscall.Read(pipe.readFD, buffer)
+		if n > 0 {
+			contents = append(contents, buffer[:n]...)
+		}
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || n == 0 {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read event pipe: %v", err)
+		}
 	}
 	return string(contents)
 }

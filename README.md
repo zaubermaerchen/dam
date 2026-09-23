@@ -103,20 +103,19 @@ invalid. The option may appear before, between, or after conditions and
 itself provide a release condition.
 
 `--events-fd N` and `--events-fd=N` enable newline-delimited JSON events on a
-dedicated file descriptor. A successful OPEN transition emits exactly two
+dedicated, already nonblocking writable pipe, FIFO, or socket descriptor on
+Unix, or a verifiable `PIPE_NOWAIT` pipe handle on Windows. Regular files and
+blocking descriptors are rejected at startup with exit status 2 before stdin
+is read. A successful OPEN transition emits exactly two
 records, `release-selected` followed by `stream-open`, before the release
 becomes visible to the data path. This also applies to a startup-satisfied
 condition when stdin is still blocked or empty; an empty stdin that reaches
-EOF without a release emits neither record. Event transport setup or write
-failures print one `events disabled: ...` warning and do not interrupt the
-primary stream. The descriptor remains owned by the caller.
-
-```bash
-producer | dam duration:3s --events-fd 3 3>events.jsonl | consumer
-```
-
-The pipeline data still flows only through stdout; `events.jsonl` receives the
-optional observation records.
+EOF without a release emits neither record. If a descriptor loses its
+nonblocking state or a write fails, dam attempts one `events disabled: ...`
+warning without waiting for stderr and continues the primary stream. A short
+write may leave a partial final JSONL record. The descriptor and its mode
+remain owned by the caller.
+The pipeline data still flows only through stdout.
 
 ```bash
 printf 'hello' | dam duration:3s

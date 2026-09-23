@@ -5,7 +5,7 @@ Use proactively to locate implementations, trace call paths,
 find tests, understand dependencies, and answer repository questions.
 """
 
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 

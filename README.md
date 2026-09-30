@@ -39,25 +39,25 @@ time.
 ## Related pipeline tools
 
 In a conventional Unix pipeline, a pipe primarily carries data from one process
-to another. Pipe-driven software also gives meaning to the flow itself. These
-small, composable tools make flow observable and controllable without needing
-to understand the contents of the data being transferred.
+to another. Pipe-driven software also gives meaning to the flow itself. The
+small, composable tools below make that flow observable and controllable without
+needing to understand the contents of the data being transferred.
 
 External conditions or signals can control flow, while flow and lifecycle
 transitions can drive other behavior, such as hooks or notifications. The
-presence, absence, and transitions of flow can themselves act as signals.
-Each tool provides a different part of this interaction:
+presence, absence, and transitions of flow can themselves act as signals. Each
+tool has a distinct role; they do not all provide every capability.
+
+An electrical circuit is a useful mental image for this interaction between
+flow and signals, rather than a strict model of Unix pipes.
 
 | Tool | Role |
 | --- | --- |
 | [`khsier`](https://github.com/zaubermaerchen/pipewisp/blob/main/docs/khsier.md) (in the pipewisp repository) | Observe flow and lifecycle transitions |
-| [`pipewisp`](https://github.com/zaubermaerchen/pipewisp) | React to lifecycle transitions through hooks or events while passing data through unchanged |
-| [`dam`](https://github.com/zaubermaerchen/dam) | Hold flow until release conditions are satisfied, then stay open |
+| [`pipewisp`](https://github.com/zaubermaerchen/pipewisp) | React to lifecycle transitions |
+| [`dam`](https://github.com/zaubermaerchen/dam) | Hold flow until release conditions are satisfied |
 | [`outage`](https://github.com/zaubermaerchen/outage) | Cut flow when a condition is triggered |
-| [`sluice`](https://github.com/zaubermaerchen/sluice) | Switch flow between open and closed states, blocking or discarding input while closed |
-
-An electrical circuit is a useful mental image for this interaction between
-flow and signals, rather than a strict model of Unix pipes.
+| [`sluice`](https://github.com/zaubermaerchen/sluice) | Switch flow between open and closed states |
 
 ## Build
 

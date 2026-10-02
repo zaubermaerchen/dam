@@ -53,7 +53,7 @@ flow and signals, rather than a strict model of Unix pipes.
 
 | Tool | Role |
 | --- | --- |
-| [`khsier`](https://github.com/zaubermaerchen/pipewisp/blob/main/docs/khsier.md) (in the pipewisp repository) | Observe flow and lifecycle transitions |
+| [`khsier`](https://github.com/zaubermaerchen/khsier) | Observe flow and lifecycle transitions |
 | [`pipewisp`](https://github.com/zaubermaerchen/pipewisp) | React to lifecycle transitions |
 | [`dam`](https://github.com/zaubermaerchen/dam) | Hold flow until release conditions are satisfied |
 | [`outage`](https://github.com/zaubermaerchen/outage) | Cut flow when a condition is triggered |

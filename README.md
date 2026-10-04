@@ -290,8 +290,12 @@ monitoring contract.
   implementation details, not a stable interface.
 - Once configured, `SIGUSR1` and/or `SIGUSR2` remain intercepted and ignored
   after release until the process exits, including when a duration, `0s`, a
-  datetime, or a file condition opens the gate first. Unconfigured
-  signals are not intercepted.
+  datetime, or a file condition opens the gate first. `dam` registers only
+  configured signals for release. An unconfigured `SIGUSR1` or `SIGUSR2` does
+  not open the gate. By default, [Go catches these signals without taking
+  action](https://pkg.go.dev/os/signal#hdr-Default_behavior_of_signals_in_Go_programs);
+  process environment can affect signal handling, so `dam` does not guarantee
+  termination for an unconfigured signal.
 - stdout contains stream data during normal operation. Help and version
   information are written to stdout; other usage messages and I/O errors are
   written to stderr and cause a non-zero exit status.

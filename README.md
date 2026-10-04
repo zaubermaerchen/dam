@@ -102,6 +102,10 @@ startup. Seconds default to `00` when omitted. Years must be between `0001` and
 during a daylight-saving transition are rejected. If a local time occurs twice,
 the earlier instant is selected. Multiple distinct
 datetime conditions are allowed.
+Datetime deadlines use wall time: if the system is suspended across a deadline,
+the condition is satisfied promptly after resume. The implementation periodically
+rechecks the wall clock while waiting; its check interval is not a CLI guarantee.
+Other discontinuous wall-clock changes have no additional timing guarantee.
 
 `datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]` accepts a strict RFC 3339
 timestamp with an explicit UTC timezone (`Z`) or numeric offset. Explicit

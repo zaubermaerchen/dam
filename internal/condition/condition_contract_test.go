@@ -101,7 +101,7 @@ func TestEngineUsesTypedDurationAndDeadlineForTimersAndEquivalence(t *testing.T)
 	mu.Unlock()
 	gotDelays := slices.Clone(rawDelays)
 	slices.Sort(gotDelays)
-	if want := []time.Duration{2 * time.Second, 3 * time.Second}; !slices.Equal(gotDelays, want) {
+	if want := []time.Duration{time.Second, 2 * time.Second}; !slices.Equal(gotDelays, want) {
 		t.Fatalf("timer delays = %v, want %v", gotDelays, want)
 	}
 	// Equal typed values use one physical timer even when their source strings
@@ -125,6 +125,130 @@ func TestEngineUsesTypedDurationAndDeadlineForTimersAndEquivalence(t *testing.T)
 	case <-engine.Satisfied():
 	case <-time.After(time.Second):
 		t.Fatal("typed duration timer did not satisfy its group")
+	}
+}
+
+func TestDatetimeRechecksWallClockAfterSuspend(t *testing.T) {
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	deadline := base.Add(time.Hour)
+	var mu sync.Mutex
+	current := base
+	var timers []chan time.Time
+	var delays []time.Duration
+	engine, err := New([]Group{{Members: []Condition{{Kind: "datetime", Deadline: deadline}}}}, Options{
+		Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return current },
+		NewTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			mu.Lock()
+			defer mu.Unlock()
+			timer := make(chan time.Time, 1)
+			timers = append(timers, timer)
+			delays = append(delays, delay)
+			return timer, func() {}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotDelays := slices.Clone(delays)
+	first := timers[0]
+	current = deadline.Add(time.Minute) // Wall time passed while the timer clock did not.
+	mu.Unlock()
+	if len(gotDelays) != 1 || gotDelays[0] != time.Second {
+		t.Fatalf("initial delays = %v, want [1s]", gotDelays)
+	}
+	first <- base
+	select {
+	case <-engine.Satisfied():
+	case <-time.After(time.Second):
+		t.Fatal("datetime did not release on first post-resume wake")
+	}
+}
+
+func TestDatetimeRearmsUntilWallDeadline(t *testing.T) {
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	deadline := base.Add(1500 * time.Millisecond)
+	var mu sync.Mutex
+	current := base
+	created := make(chan struct{}, 3)
+	var timers []chan time.Time
+	var delays []time.Duration
+	engine, err := New([]Group{{Members: []Condition{{Kind: "datetime", Deadline: deadline}}}}, Options{
+		Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return current },
+		NewTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			mu.Lock()
+			defer mu.Unlock()
+			timer := make(chan time.Time, 1)
+			timers = append(timers, timer)
+			delays = append(delays, delay)
+			created <- struct{}{}
+			return timer, func() {}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotDelays := slices.Clone(delays)
+	first := timers[0]
+	current = base.Add(time.Second)
+	mu.Unlock()
+	if len(gotDelays) != 1 || gotDelays[0] != time.Second {
+		t.Fatalf("initial delays = %v, want [1s]", gotDelays)
+	}
+	first <- base
+	select {
+	case <-created:
+	case <-time.After(time.Second):
+		t.Fatal("initial datetime timer was not created")
+	}
+	select {
+	case <-created:
+	case <-time.After(time.Second):
+		t.Fatal("datetime did not rearm before deadline")
+	}
+	mu.Lock()
+	gotDelays = slices.Clone(delays)
+	second := timers[1]
+	mu.Unlock()
+	if len(gotDelays) != 2 || gotDelays[1] != 500*time.Millisecond {
+		t.Fatalf("timer delays = %v, want [1s 500ms]", gotDelays)
+	}
+	select {
+	case <-engine.Satisfied():
+		t.Fatal("datetime released before deadline")
+	default:
+	}
+	mu.Lock()
+	current = base.Add(-time.Second) // A backward wall-clock change must rearm.
+	mu.Unlock()
+	second <- base
+	select {
+	case <-created:
+	case <-time.After(time.Second):
+		t.Fatal("datetime did not rearm after backward wall-clock change")
+	}
+	mu.Lock()
+	gotDelays = slices.Clone(delays)
+	third := timers[2]
+	current = deadline
+	mu.Unlock()
+	if len(gotDelays) != 3 || gotDelays[2] != time.Second {
+		t.Fatalf("timer delays = %v, want [1s 500ms 1s]", gotDelays)
+	}
+	third <- deadline
+	select {
+	case <-engine.Satisfied():
+	case <-time.After(time.Second):
+		t.Fatal("datetime did not release at deadline")
 	}
 }
 

@@ -20,7 +20,7 @@
 - stdin を読む前に全 file 条件の初回 probe を完了します。初回の stat error や non-regular 結果は pending として扱い、別の file が regular、`0s`、または入力前に届いた signal の release を妨げません。CLOSED 中も次回 probe で retry します。filesystem 上の変化時刻や probe 開始時刻の厳密な先後は保証しません。
 - EOF が解放前に到達しても遅延を短縮しません。入力が一度もなければタイマーを開始しません。空 stdin の EOF は release condition を待たず正常終了し、file monitor を停止します。データ受信後の EOF または read error は CLOSED のまま保持され、duration、datetime、signal、または file による解放後に held data を転送して EOF/error として終了します。
 - duration、datetime、設定済み signal、file 条件は OR で、一度開いたゲートは再び閉じません。OPEN を確定したら全 file monitor と time monitor を停止し、進行中の probe の完了を待たず、その後に届いた結果を無視します。OPEN 後、最初の stdout write より前でもゲートは OPEN とみなします。
-- 設定済みの SIGUSR1 / SIGUSR2 は最初の入力前から監視し、解放後もプロセス終了まで捕捉・無視します。duration、`0s`、datetime、または file が先に解放した場合も後続 signal でプロセスを終了させません。未設定のUSR signalは捕捉しません。Windows その他の未対応環境では signal を含まない duration / datetime / file の構成（組合せ含む）を受理しますが、signal 設定を含む構成は明示的な引数エラーとして拒否します。
+- 設定済みの SIGUSR1 / SIGUSR2 は最初の入力前から監視し、解放後もプロセス終了まで捕捉・無視します。duration、`0s`、datetime、または file が先に解放した場合も後続 signal でプロセスを終了させません。dam が解放条件として登録するのは設定済み signal のみです。未設定の SIGUSR1 / SIGUSR2 は gate を解放しません。通常の Go runtime はこれらの signal を捕捉して何もしませんが、プロセス環境によって扱いが変わるため、終了は保証しません。Windows その他の未対応環境では signal を含まない duration / datetime / file の構成（組合せ含む）を受理しますが、signal 設定を含む構成は明示的な引数エラーとして拒否します。
 - 入力をバイナリを含め byte-for-byte で保持し、通常のストリーム処理中の stdout はストリームデータ専用とします。help/version の情報出力は stdout、診断は stderr 専用です。
 - 解放前に保持するストリームデータは実装内部の有界バッファに保持し、空き容量までは短い read も集約し、満杯後は通常のパイプのバックプレッシャーを利用します。バッファ容量は公開契約ではなく、現在の `preReleaseBufferSize` も内部実装詳細として扱います。
 - タイマー待機中に stdin read がブロックしても、解放時刻に保持済みデータを書き出せる構造を維持します。進行中の read が返したデータは順序を崩さず、その後に転送します。

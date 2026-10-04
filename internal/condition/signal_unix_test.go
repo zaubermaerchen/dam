@@ -27,8 +27,8 @@ func TestReleaseMonitorContinuesConsumingConfiguredSignalsAfterSelection(t *test
 		t.Fatal("configured signal did not satisfy the condition")
 	}
 
-	// The signal subscription remains live after selection so a later signal
-	// cannot restore its default terminating behavior before process cleanup.
+	// The signal subscription remains live after selection so later configured
+	// signals continue to be consumed before process cleanup.
 	monitor.signals <- syscall.SIGUSR1
 	select {
 	case <-time.After(10 * time.Millisecond):

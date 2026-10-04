@@ -86,9 +86,8 @@ var version = "dev"
 var errReleaseFailureChannelClosed = errors.New("internal error: release failure channel closed")
 
 func main() {
-	// Keep the signal monitor registered until os.Exit so a configured SIGUSR1
-	// cannot be restored to its terminating default action during normal CLI
-	// shutdown. The run wrapper cleans it up for long-lived unit tests.
+	// Keep configured signals registered until os.Exit so they remain consumed
+	// during normal CLI shutdown. The run wrapper cleans up long-lived unit tests.
 	status, _ := execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	os.Exit(status)
 }

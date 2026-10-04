@@ -69,16 +69,6 @@ func (sink *Sink) EmitStreamOpen() {
 	sink.writeEventLocked("stream-open")
 }
 
-// EmitOpen preserves the original convenience API for callers that do not
-// need to observe the runtime gate between the two transitions.
-func (sink *Sink) EmitOpen() {
-	if sink == nil {
-		return
-	}
-	sink.EmitReleaseSelected()
-	sink.EmitStreamOpen()
-}
-
 func (sink *Sink) writeEventLocked(name string) bool {
 	if sink.writer == nil || sink.disabled {
 		return false

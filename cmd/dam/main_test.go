@@ -20,6 +20,34 @@ const (
 	testTimeout    = 5 * time.Second
 )
 
+// Test entry points clean up monitors and allow a deterministic clock or
+// readiness callback without changing the command's process lifecycle.
+func run(args []string, input io.Reader, output, diagnostics io.Writer) int {
+	return runWithClock(args, input, output, diagnostics, defaultRuntimeClock())
+}
+
+func runWithClock(args []string, input io.Reader, output, diagnostics io.Writer, clock runtimeClock) int {
+	status, cleanup := executeWithClock(args, input, output, diagnostics, nil, clock)
+	if cleanup != nil {
+		cleanup()
+	}
+	return status
+}
+
+func executeWithReady(args []string, input io.Reader, output, diagnostics io.Writer, ready func()) (int, func()) {
+	return executeWithClock(args, input, output, diagnostics, ready, defaultRuntimeClock())
+}
+
+// These entry points let forwarding tests inject a release without constructing
+// a condition engine.
+func forward(input io.Reader, output io.Writer, release <-chan struct{}) error {
+	return forwardWithFailureAndBuffer(input, output, release, nil, nil, nil, preReleaseBufferSize)
+}
+
+func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int) error {
+	return forwardWithFailureAndBufferAndStart(input, output, release, failures, open, completeEmpty, bufferSize, func() error { return nil })
+}
+
 const expectedHelpText = `Usage:
   dam CONDITION [--or CONDITION]... [--buffer-size SIZE]
   dam --help
@@ -949,8 +977,7 @@ func TestForwardStopsReadingAtConfiguredBufferLimit(t *testing.T) {
 	output := &bytes.Buffer{}
 	status := make(chan error, 1)
 	go func() {
-		delay := time.Hour
-		status <- forwardWithFailureAndBuffer(input, output, &delay, release, nil, nil, nil, maxBufferSize)
+		status <- forwardWithFailureAndBuffer(input, output, release, nil, nil, nil, maxBufferSize)
 	}()
 
 	wantReads := (maxBufferSize + readChunkSize - 1) / readChunkSize
@@ -1111,7 +1138,7 @@ func TestForwardReleasesOnInjectedEventBeforeFirstInput(t *testing.T) {
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
 	status := make(chan error, 1)
 	go func() {
-		status <- forward(input, output, nil, event)
+		status <- forward(input, output, event)
 	}()
 
 	select {
@@ -1146,7 +1173,7 @@ func TestForwardWaitsForInjectedEventAfterDataEOF(t *testing.T) {
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
 	status := make(chan error, 1)
 	go func() {
-		status <- forward(input, output, nil, event)
+		status <- forward(input, output, event)
 	}()
 
 	select {
@@ -1176,7 +1203,7 @@ func TestForwardCompletesBufferedReadErrorAfterInjectedRelease(t *testing.T) {
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
 	status := make(chan error, 1)
 	go func() {
-		status <- forward(input, output, nil, event)
+		status <- forward(input, output, event)
 	}()
 
 	select {
@@ -1206,7 +1233,7 @@ func TestForwardExitsOnEmptyEOFWithoutWaitingForInjectedEvent(t *testing.T) {
 	var output bytes.Buffer
 	status := make(chan error, 1)
 	go func() {
-		status <- forward(strings.NewReader(""), &output, nil, event)
+		status <- forward(strings.NewReader(""), &output, event)
 	}()
 
 	select {
@@ -1222,33 +1249,75 @@ func TestForwardExitsOnEmptyEOFWithoutWaitingForInjectedEvent(t *testing.T) {
 	}
 }
 
-func TestForwardUsesEarlierOfDurationAndInjectedEvent(t *testing.T) {
+func TestRunFileReleasesWhileDurationPending(t *testing.T) {
 	delay := time.Second
-	input := eofReader{data: []byte("released")}
-	event := make(chan struct{})
+	path := filepath.Join(t.TempDir(), "release")
+	timerStarted := make(chan time.Duration, 1)
+	timerFired := make(chan time.Time, 1)
+	input := &firstReadGate{
+		data:    []byte("released"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-input.release:
+		default:
+			close(input.release)
+		}
+		select {
+		case timerFired <- time.Now():
+		default:
+		}
+	})
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 1)}
-	status := make(chan error, 1)
-	startedAt := time.Now()
+	var diagnostics bytes.Buffer
+	status := make(chan int, 1)
 	go func() {
-		status <- forward(input, output, &delay, event)
+		status <- runWithClock([]string{"duration:" + delay.String(), "--or", "file:" + path}, input, output, &diagnostics, runtimeClock{
+			newTimer: func(gotDelay time.Duration) (<-chan time.Time, func()) {
+				timerStarted <- gotDelay
+				return timerFired, func() {}
+			},
+		})
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-	close(event)
 	select {
-	case wroteAt := <-output.writeTimes:
-		if elapsed := wroteAt.Sub(startedAt); elapsed >= delay {
-			t.Fatalf("event release took %s, want less than %s", elapsed, delay)
+	case <-input.started:
+	case <-time.After(testTimeout):
+		t.Fatal("run did not start reading input")
+	}
+	close(input.release)
+	select {
+	case gotDelay := <-timerStarted:
+		if gotDelay != delay {
+			t.Fatalf("duration timer = %s, want %s", gotDelay, delay)
 		}
 	case <-time.After(testTimeout):
-		t.Fatal("event did not release output")
+		t.Fatal("duration timer did not start after input")
 	}
-	if err := <-status; err != nil {
-		t.Fatalf("forward returned error: %v", err)
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatalf("create release file: %v", err)
+	}
+	select {
+	case <-output.writeTimes:
+	case <-time.After(testTimeout):
+		t.Fatal("file did not release output")
+	}
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Fatalf("run status = %d, diagnostics = %q", got, diagnostics.String())
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("run did not finish after file release")
+	}
+	if got, want := output.String(), "released"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 
-func TestForwardFlushesWhenTimerIsReadyBeforeReadResult(t *testing.T) {
+func TestRunFlushesWhenDurationIsReadyBeforeReadResult(t *testing.T) {
 	delay := 100 * time.Millisecond
 	input := &timerReadReader{
 		secondStarted: make(chan struct{}),
@@ -1256,9 +1325,10 @@ func TestForwardFlushesWhenTimerIsReadyBeforeReadResult(t *testing.T) {
 		thirdStarted:  make(chan time.Time, 1),
 	}
 	output := &lockedBuffer{writeTimes: make(chan time.Time, 2)}
-	status := make(chan error, 1)
+	var diagnostics bytes.Buffer
+	status := make(chan int, 1)
 	go func() {
-		status <- forward(input, output, &delay, nil)
+		status <- run([]string{"duration:" + delay.String()}, input, output, &diagnostics)
 	}()
 
 	select {
@@ -1283,8 +1353,8 @@ func TestForwardFlushesWhenTimerIsReadyBeforeReadResult(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("forward did not continue reading after release")
 	}
-	if err := <-status; err != nil {
-		t.Fatalf("forward returned error: %v", err)
+	if got := <-status; got != 0 {
+		t.Fatalf("run status = %d, diagnostics = %q", got, diagnostics.String())
 	}
 	if got, want := output.String(), "abc"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)

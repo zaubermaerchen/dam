@@ -27,14 +27,13 @@ type releaseGroup struct {
 }
 
 type testConfig struct {
-	delay             *time.Duration
-	deadline          *time.Time
-	signals           []string
-	files             []string
-	groups            []releaseGroup
-	eventsFD          *int
-	bufferSize        int
-	immediateDuration bool
+	delay      *time.Duration
+	deadline   *time.Time
+	signals    []string
+	files      []string
+	groups     []releaseGroup
+	eventsFD   *int
+	bufferSize int
 }
 
 func newDurationReleaseCondition(value time.Duration) releaseCondition {
@@ -54,7 +53,7 @@ func parseConfigAt(args []string, location *time.Location) (testConfig, error) {
 	if err != nil {
 		return testConfig{}, err
 	}
-	config := testConfig{bufferSize: plan.BufferSize, immediateDuration: plan.ImmediateDuration}
+	config := testConfig{bufferSize: plan.BufferSize}
 	if plan.EventsFD != nil {
 		fd := *plan.EventsFD
 		config.eventsFD = &fd
@@ -695,13 +694,13 @@ func TestParseConfigAcceptsTimedMembersInsideANDGroups(t *testing.T) {
 	}
 }
 
-func TestParseConfigTracksImmediateDurationRegardlessOfConditionOrder(t *testing.T) {
+func TestParseConfigPreservesImmediateDurationRegardlessOfConditionOrder(t *testing.T) {
 	config, err := parseConfig([]string{"signal:USR1", "--or", "duration:1s", "--or", "duration:0s"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
-	if !config.immediateDuration {
-		t.Fatal("config did not track an immediate duration")
+	if got := config.groups[2].members[0]; got.kind != "duration" || got.duration != 0 {
+		t.Fatalf("last condition = %#v, want immediate duration", got)
 	}
 }
 

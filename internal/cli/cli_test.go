@@ -23,8 +23,8 @@ func TestParseBuildsGroupsAndOptions(t *testing.T) {
 	if got, want := len(plan.Groups[0].Members), 2; got != want {
 		t.Fatalf("first group member count = %d, want %d", got, want)
 	}
-	if !plan.ImmediateDuration {
-		t.Fatal("ImmediateDuration = false, want true")
+	if got := plan.Groups[0].Members[0]; got.Kind != "duration" || got.Duration != 0 {
+		t.Fatalf("first condition = %#v, want immediate duration", got)
 	}
 	if got, want := plan.BufferSize, 2*1024; got != want {
 		t.Fatalf("BufferSize = %d, want %d", got, want)

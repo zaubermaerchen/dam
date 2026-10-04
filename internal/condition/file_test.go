@@ -16,6 +16,12 @@ import (
 
 const fileMonitorTestTimeout = time.Second
 
+func (m *fileMonitor) Close() {
+	if m != nil && m.engine != nil {
+		m.engine.stopFiles()
+	}
+}
+
 func TestProbeFileReleaseClassifiesMissingAndRegularFiles(t *testing.T) {
 	dir := t.TempDir()
 	regular := filepath.Join(dir, "ready")
@@ -804,15 +810,15 @@ func TestInitialPendingSelectionDoesNotSpawnStoppedWatchers(t *testing.T) {
 	}
 }
 
-func TestCollectInitialFileProbeResultsIgnoresProbeErrors(t *testing.T) {
+func TestInitialFileProbeSummaryIgnoresRetryableErrors(t *testing.T) {
 	results := make(chan fileProbeResult, 2)
 	results <- fileProbeResult{index: 1, err: errors.New("second probe error")}
 	results <- fileProbeResult{index: 0, err: errors.New("first probe error")}
-	first, anyReady := collectInitialFileProbeResults(results, 2)
-	if first != nil {
-		t.Fatalf("initial error = %v, want nil for retryable probe errors", first)
+	ordered := collectOrderedInitialFileProbeResults(results, 2)
+	if ordered[0].index != 0 || ordered[1].index != 1 {
+		t.Fatalf("initial results = %#v, want input path order", ordered)
 	}
-	if anyReady {
+	if summarizeInitialFileProbeResults(ordered) {
 		t.Fatal("initial results reported a ready file without a ready result")
 	}
 }

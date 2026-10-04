@@ -23,7 +23,7 @@ func TestEngineLatchesANDMembersAndFansOutEquivalentDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-engine.Release():
+	case <-engine.Satisfied():
 		t.Fatal("duration alone satisfied an incomplete group")
 	default:
 	}
@@ -31,7 +31,7 @@ func TestEngineLatchesANDMembersAndFansOutEquivalentDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-engine.Release():
+	case <-engine.Satisfied():
 	case <-time.After(time.Second):
 		t.Fatal("AND group did not release")
 	}
@@ -77,7 +77,7 @@ func TestEngineStartsDistinctDurationsFromOneCall(t *testing.T) {
 	}
 	gotTimers[0] <- now
 	select {
-	case <-engine.Release():
+	case <-engine.Satisfied():
 	case <-time.After(time.Second):
 		t.Fatal("first duration did not release its alternative")
 	}
@@ -109,7 +109,7 @@ func TestEngineInitialFileProbeErrorsRemainPendingAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-engine.Release():
+	case <-engine.Satisfied():
 	case <-time.After(time.Second):
 		t.Fatal("file probe did not retry")
 	}
@@ -219,7 +219,7 @@ func TestEngineInitializesTimedMonitorBeforeSignalMonitor(t *testing.T) {
 		if err := current.satisfyCondition("signal", "SIGUSR1"); err != nil {
 			t.Errorf("satisfy signal: %v", err)
 		}
-		return &releaseMonitor{engine: current}, nil
+		return &releaseMonitor{}, nil
 	}
 
 	if err := engine.Start(); err != nil {

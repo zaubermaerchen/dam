@@ -13,8 +13,10 @@ func TestSinkDisablesAfterWriteFailureOnce(t *testing.T) {
 	diagnostics := channelDiagnostic{messages: make(chan string, 2)}
 	writer := &failingEventFD{err: io.ErrClosedPipe}
 	sink := &Sink{writer: writer, diagnostics: &diagnostics}
-	sink.EmitOpen()
-	sink.EmitOpen()
+	sink.EmitReleaseSelected()
+	sink.EmitStreamOpen()
+	sink.EmitReleaseSelected()
+	sink.EmitStreamOpen()
 
 	if writer.writes != 1 {
 		t.Fatalf("event writes = %d, want 1", writer.writes)
@@ -35,7 +37,8 @@ func TestSinkWarningDoesNotBlockDataPath(t *testing.T) {
 	done := make(chan struct{})
 	sink := &Sink{writer: &failingEventFD{err: io.ErrClosedPipe}, diagnostics: blockingDiagnostic{started: started, unblock: unblock}}
 	go func() {
-		sink.EmitOpen()
+		sink.EmitReleaseSelected()
+		sink.EmitStreamOpen()
 		close(done)
 	}()
 	select {
@@ -68,7 +71,8 @@ func TestSinkDisablesAfterShortWrite(t *testing.T) {
 	diagnostics := channelDiagnostic{messages: make(chan string, 1)}
 	writer := &failingEventFD{short: true}
 	sink := &Sink{writer: writer, diagnostics: &diagnostics}
-	sink.EmitOpen()
+	sink.EmitReleaseSelected()
+	sink.EmitStreamOpen()
 
 	if writer.writes != 1 {
 		t.Fatalf("event writes = %d, want 1", writer.writes)

@@ -45,7 +45,6 @@ type Engine struct {
 	filePaths        map[string]*filePathState
 
 	started          bool
-	durationsStarted bool
 	timed            *timedReleaseMonitor
 	signals          *releaseMonitor
 	now              func() time.Time
@@ -120,12 +119,10 @@ func (engine *Engine) Start() error {
 	}
 	paths := engine.configuredFiles()
 	if len(paths) > 0 {
-		monitor, err := newFileMonitorWithProbe(paths, engine, engine.fileProbe, engine.filePollInterval)
-		if err != nil {
+		if _, err := newFileMonitorWithProbe(paths, engine, engine.fileProbe, engine.filePollInterval); err != nil {
 			engine.Close()
 			return err
 		}
-		_ = monitor
 	} else if err := engine.finishInitial(); err != nil {
 		engine.Close()
 		return err
@@ -158,14 +155,6 @@ func (engine *Engine) StartDurations() error {
 	return engine.timed.startDurations()
 }
 
-// Release is retained as a compatibility synonym for Satisfied.
-func (engine *Engine) Release() <-chan struct{} {
-	if engine == nil {
-		return nil
-	}
-	return engine.release
-}
-
 // Failures reports the first monitor failure before selection or completion.
 func (engine *Engine) Failures() <-chan error {
 	if engine == nil {
@@ -174,8 +163,7 @@ func (engine *Engine) Failures() <-chan error {
 	return engine.fatal
 }
 
-// Satisfied closes when an alternative group has become satisfied. Release is
-// retained as a synonym for the runtime adapter's transition vocabulary.
+// Satisfied closes when an alternative group has become satisfied.
 func (engine *Engine) Satisfied() <-chan struct{} {
 	if engine == nil {
 		return nil

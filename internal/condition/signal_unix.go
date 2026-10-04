@@ -15,7 +15,6 @@ import (
 )
 
 type releaseMonitor struct {
-	release chan struct{}
 	done    chan struct{}
 	stop    sync.Once
 	signals chan os.Signal
@@ -24,31 +23,12 @@ type releaseMonitor struct {
 
 func signalReleaseSupported() bool { return true }
 
-func newReleaseMonitor(configured []string, engines ...*Engine) (*releaseMonitor, error) {
-	if len(engines) > 1 {
-		return nil, fmt.Errorf("multiple release engines are not supported")
-	}
-	var engine *Engine
-	if len(engines) == 1 {
-		engine = engines[0]
-	}
-	return newReleaseMonitorWithEngine(configured, engine)
-}
-
-func newReleaseMonitorWithEngine(configured []string, engine *Engine) (*releaseMonitor, error) {
+func newReleaseMonitor(configured []string, engine *Engine) (*releaseMonitor, error) {
 	effectiveSignals, err := resolveReleaseSignals(configured)
 	if err != nil {
 		return nil, err
 	}
-	if engine == nil && len(effectiveSignals) == 0 {
-		return &releaseMonitor{}, nil
-	}
-	if engine == nil {
-		engine = newEngine(false)
-	}
-
 	monitor := &releaseMonitor{
-		release: engine.release,
 		done:    make(chan struct{}),
 		signals: make(chan os.Signal, len(effectiveSignals)),
 		engine:  engine,
@@ -99,17 +79,6 @@ func canonicalReleaseSignal(received os.Signal) string {
 	default:
 		return ""
 	}
-}
-
-func (monitor *releaseMonitor) Release() <-chan struct{} {
-	return monitor.release
-}
-
-func (monitor *releaseMonitor) Failures() <-chan error {
-	if monitor.engine == nil {
-		return nil
-	}
-	return monitor.engine.fatal
 }
 
 func (monitor *releaseMonitor) Close() {

@@ -97,13 +97,6 @@ func (monitor *timedReleaseMonitor) startDurations() error {
 	return nil
 }
 
-func (monitor *timedReleaseMonitor) startEvent(kind, source string, target time.Time) error {
-	if monitor == nil {
-		return nil
-	}
-	return monitor.startEventAt(kind, source, target, monitor.now())
-}
-
 func (monitor *timedReleaseMonitor) startEventAt(kind, source string, target, current time.Time) error {
 	if monitor == nil || monitor.engine == nil {
 		return nil
@@ -340,8 +333,4 @@ func datetimeReleaseKey(value time.Time) string {
 
 func (engine *Engine) satisfyDuration(value time.Duration) error {
 	return engine.satisfyCondition("duration", durationReleaseKey(value))
-}
-
-func (engine *Engine) satisfyDatetime(value time.Time) error {
-	return engine.satisfyCondition("datetime", datetimeReleaseKey(value))
 }

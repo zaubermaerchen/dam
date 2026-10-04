@@ -694,9 +694,14 @@ func TestRunPassesThroughAfterReleaseWithoutSecondGate(t *testing.T) {
 
 func TestRunAbsoluteDeadlineReleasesBeforeFirstInput(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	var clockMu sync.Mutex
 	timerFired := make(chan time.Time, 1)
 	clock := runtimeClock{
-		now:      func() time.Time { return now },
+		now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
 		location: time.UTC,
 		newTimer: func(time.Duration) (<-chan time.Time, func()) {
 			return timerFired, func() {}
@@ -719,6 +724,9 @@ func TestRunAbsoluteDeadlineReleasesBeforeFirstInput(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("run did not attempt the first read")
 	}
+	clockMu.Lock()
+	now = now.Add(5 * time.Second)
+	clockMu.Unlock()
 	timerFired <- now
 	select {
 	case <-output.writeTimes:

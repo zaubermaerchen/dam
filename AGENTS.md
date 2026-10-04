@@ -8,7 +8,7 @@
 
 - `CONDITION` は `duration:DURATION`、`datetime:YYYY-MM-DDTHH:MM[:SS]`、`datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]`、`signal:USR1` / `signal:SIGUSR1`、`signal:USR2` / `signal:SIGUSR2`、または `file:PATH` とします。その他の type、signal 名、大文字小文字違い、不正形式はエラーです。
 - `duration:DURATION` は `time.ParseDuration` 互換とし、`0s` は即時成立、負値と不正値はエラーとします。複数の duration を指定でき、正の duration はすべて stdin の最初の非空 read 完了を同じ開始点として監視します。
-- `datetime:YYYY-MM-DDTHH:MM[:SS]` はローカル時刻として起動時から監視します。秒は省略可能で、無効な日時と存在しない DST 時刻はエラーとします。明示的な timezone は秒付きの strict RFC 3339 (`Z` または `+HH:MM` / `-HH:MM`) のみ受理し、小数秒、小文字の `z`、名前付き timezone、不正な offset はエラーとします。複数の datetime を指定できます。
+- `datetime:YYYY-MM-DDTHH:MM[:SS]` はローカル時刻として起動時から監視します。秒は省略可能で、無効な日時と存在しない DST 時刻はエラーとします。明示的な timezone は秒付きの strict RFC 3339 (`Z` または `+HH:MM` / `-HH:MM`) のみ受理し、小数秒、小文字の `z`、名前付き timezone、不正な offset はエラーとします。複数の datetime を指定できます。datetime は絶対的な壁時計時刻であり、system suspend 中に設定時刻を過ぎた場合、復帰後速やかに成立します。待機中の壁時計再確認間隔は内部実装詳細であり、その他の不連続な時計変更のタイミングは公開契約にしません。
 - duration は parse 後の値、datetime は解決後の instant が同じ条件なら equivalent として1つの latch/event を共有します。異なる値は独立した条件です。signal alias は正規化しますが、file path は正規化・実体同一性による重複排除を行いません。
 - 条件引数の順序は自由で、`--or CONDITION` と `--or=CONDITION` の両方を受理します。`--or` は直前の condition と次の condition の間に必要で、先頭・末尾・連続・空値はエラーです。`--buffer-size SIZE` と `--buffer-size=SIZE` は条件や `--or` の前後に置け、SIZE は正の decimal byte count または `K/k`、`M/m`、`G/g` の binary suffix 付きで、複数指定時は最後の値を使います。
 - 1つの argument 内で exact な ` && ` で連結した条件は AND group です。シェルに `&&` を解釈させないよう group 全体を quote します。group member は成立時に latch するため、成立順序に依存せず、file が成立後に削除されても gate は閉じません。

@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const datetimeRecheckInterval = time.Second
+
 type timedReleaseMonitor struct {
 	engine   *Engine
 	now      func() time.Time
@@ -113,12 +115,7 @@ func (monitor *timedReleaseMonitor) startEventAt(kind, source string, target, cu
 		return monitor.engine.satisfyCondition(kind, source)
 	}
 
-	wait := target.Sub(current)
-	capped := false
-	if !current.Add(wait).Equal(target) {
-		wait = time.Duration(1<<63 - 1)
-		capped = true
-	}
+	wait, capped := timedEventWait(kind, target, current)
 	timerC, stopTimer := monitor.newTimer(wait)
 	if timerC == nil {
 		if stopTimer != nil {
@@ -148,16 +145,12 @@ func (monitor *timedReleaseMonitor) waitForEvent(timer *timedReleaseTimer, kind,
 				return
 			}
 			current := monitor.now()
-			if !capped || !target.After(current) {
+			if (kind != "datetime" && !capped) || !target.After(current) {
 				_ = monitor.engine.satisfyCondition(kind, source)
 				return
 			}
-			wait := target.Sub(current)
-			capped = false
-			if !current.Add(wait).Equal(target) {
-				wait = time.Duration(1<<63 - 1)
-				capped = true
-			}
+			wait, nextCapped := timedEventWait(kind, target, current)
+			capped = nextCapped
 			nextTimer, stopTimer := monitor.newTimer(wait)
 			if nextTimer == nil {
 				if stopTimer != nil {
@@ -179,6 +172,22 @@ func (monitor *timedReleaseMonitor) waitForEvent(timer *timedReleaseTimer, kind,
 			return
 		}
 	}
+}
+
+func timedEventWait(kind string, target, current time.Time) (time.Duration, bool) {
+	wait := target.Sub(current)
+	capped := false
+	if !current.Add(wait).Equal(target) {
+		wait = time.Duration(1<<63 - 1)
+		capped = true
+	}
+	// Go timers use a monotonic clock that can pause during suspend. Bound a
+	// datetime wait so resume checks the absolute wall deadline promptly.
+	if kind == "datetime" && wait > datetimeRecheckInterval {
+		wait = datetimeRecheckInterval
+		capped = true
+	}
+	return wait, capped
 }
 
 func (timer *timedReleaseTimer) arm(stopTimer func()) bool {

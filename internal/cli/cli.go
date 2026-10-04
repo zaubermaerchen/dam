@@ -176,7 +176,7 @@ func parseConditionAt(value string, location *time.Location) (Condition, error) 
 	case "datetime":
 		deadline, err := parseAbsoluteDeadline(source, location)
 		if err != nil {
-			return Condition{}, invalidReleaseCondition(value)
+			return Condition{}, fmt.Errorf("invalid release condition %q: %w", value, err)
 		}
 		return Condition{Kind: "datetime", Source: deadline.UTC().Format(time.RFC3339Nano), Deadline: deadline}, nil
 	case "signal":

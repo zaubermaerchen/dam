@@ -1081,6 +1081,26 @@ func TestRunReportsSupportedDatetimeSyntaxInInvalidConditionDiagnostic(t *testin
 	}
 }
 
+func TestRunReportsInvalidDatetimeBeforeStartingRuntime(t *testing.T) {
+	input := &trackingReader{}
+	var output, diagnostics bytes.Buffer
+	ready := false
+	status, cleanup := executeWithClock(
+		[]string{"datetime:2026-02-29T12:00"}, input, &output, &diagnostics,
+		func() { ready = true }, runtimeClock{location: time.UTC},
+	)
+	if cleanup != nil {
+		cleanup()
+		t.Fatal("invalid datetime started runtime cleanup")
+	}
+	if status == 0 || ready || input.reads != 0 || output.Len() != 0 {
+		t.Fatalf("status=%d ready=%t reads=%d stdout=%q", status, ready, input.reads, output.String())
+	}
+	if got := diagnostics.String(); !strings.Contains(got, "datetime:2026-02-29T12:00") || !strings.Contains(got, "not a valid local datetime") {
+		t.Fatalf("diagnostic = %q, want datetime context and cause", got)
+	}
+}
+
 func TestForwardReleasesOnInjectedEventBeforeFirstInput(t *testing.T) {
 	input := &firstReadGate{
 		data:    []byte("event-opened"),

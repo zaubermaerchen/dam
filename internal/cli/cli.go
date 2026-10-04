@@ -14,10 +14,9 @@ const defaultBufferSize = 64 * 1024
 // Plan is the validated command-line configuration consumed by the runtime.
 // Groups preserve argument order and duplicate file members exactly as given.
 type Plan struct {
-	Groups            []Group
-	BufferSize        int
-	EventsFD          *int
-	ImmediateDuration bool
+	Groups     []Group
+	BufferSize int
+	EventsFD   *int
 }
 
 // Group is one AND alternative in a command-line release plan.
@@ -109,7 +108,7 @@ func ParseAt(args []string, location *time.Location) (Plan, error) {
 			if err != nil {
 				return Plan{}, err
 			}
-			plan.addGroup(group)
+			plan.Groups = append(plan.Groups, group)
 			pendingOR = false
 		case strings.HasPrefix(arg, "--"):
 			return Plan{}, fmt.Errorf("unknown option %q", arg)
@@ -121,7 +120,7 @@ func ParseAt(args []string, location *time.Location) (Plan, error) {
 			if err != nil {
 				return Plan{}, err
 			}
-			plan.addGroup(group)
+			plan.Groups = append(plan.Groups, group)
 			hasCondition = true
 			pendingOR = false
 		}
@@ -133,15 +132,6 @@ func ParseAt(args []string, location *time.Location) (Plan, error) {
 		return Plan{}, fmt.Errorf("--or requires a condition")
 	}
 	return plan, nil
-}
-
-func (plan *Plan) addGroup(group Group) {
-	plan.Groups = append(plan.Groups, group)
-	for _, condition := range group.Members {
-		if condition.Kind == "duration" && condition.Duration == 0 {
-			plan.ImmediateDuration = true
-		}
-	}
 }
 
 func parseGroupAt(value string, location *time.Location) (Group, error) {

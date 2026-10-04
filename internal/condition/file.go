@@ -301,10 +301,6 @@ func nextFilePollInterval(interval time.Duration) time.Duration {
 	return next
 }
 
-func newFileMonitor(paths []string, engine *Engine) (*fileMonitor, error) {
-	return newFileMonitorWithProbe(paths, engine, probeFileRelease, filePollInterval)
-}
-
 func newFileMonitorWithProbe(paths []string, engine *Engine, probe fileProbe, interval time.Duration) (*fileMonitor, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("file monitor requires a release engine")
@@ -337,7 +333,7 @@ func newFileMonitorWithProbe(paths []string, engine *Engine, probe fileProbe, in
 	}
 
 	orderedResults := collectOrderedInitialFileProbeResults(results, len(monitor.paths))
-	_, anyReady := summarizeInitialFileProbeResults(orderedResults)
+	anyReady := summarizeInitialFileProbeResults(orderedResults)
 	if len(engine.groups) > 0 {
 		for _, result := range orderedResults {
 			if result.err == nil && result.ready {
@@ -371,10 +367,6 @@ type fileProbeResult struct {
 	err   error
 }
 
-func collectInitialFileProbeResults(results <-chan fileProbeResult, count int) (firstFatal error, anyReady bool) {
-	return summarizeInitialFileProbeResults(collectOrderedInitialFileProbeResults(results, count))
-}
-
 func collectOrderedInitialFileProbeResults(results <-chan fileProbeResult, count int) []fileProbeResult {
 	orderedResults := make([]fileProbeResult, count)
 	for range count {
@@ -384,19 +376,11 @@ func collectOrderedInitialFileProbeResults(results <-chan fileProbeResult, count
 	return orderedResults
 }
 
-func summarizeInitialFileProbeResults(orderedResults []fileProbeResult) (firstFatal error, anyReady bool) {
+func summarizeInitialFileProbeResults(orderedResults []fileProbeResult) (anyReady bool) {
 	for _, result := range orderedResults {
 		anyReady = anyReady || (result.err == nil && result.ready)
 	}
-	// The first return is retained for callers that still inspect the old
-	// result shape; file probe errors are retryable and never become fatal.
-	return nil, anyReady
-}
-
-func (m *fileMonitor) Close() {
-	if m != nil && m.engine != nil {
-		m.engine.stopFiles()
-	}
+	return anyReady
 }
 
 func (m *fileMonitor) watchPath(path string) {

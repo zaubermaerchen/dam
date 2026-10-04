@@ -11,7 +11,7 @@ import (
 func TestReleaseMonitorContinuesConsumingConfiguredSignalsAfterSelection(t *testing.T) {
 	engine := newEngineWithGroups(false, []Group{{Members: []Condition{{Kind: "signal", Source: "SIGUSR1"}}}})
 	defer engine.Close()
-	monitor, err := newReleaseMonitorWithEngine([]string{"SIGUSR1"}, engine)
+	monitor, err := newReleaseMonitor([]string{"SIGUSR1"}, engine)
 	if err != nil {
 		t.Fatal(err)
 	}

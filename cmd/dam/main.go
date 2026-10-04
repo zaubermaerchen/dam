@@ -92,24 +92,8 @@ func main() {
 	os.Exit(status)
 }
 
-func run(args []string, input io.Reader, output, diagnostics io.Writer) int {
-	return runWithClock(args, input, output, diagnostics, defaultRuntimeClock())
-}
-
-func runWithClock(args []string, input io.Reader, output, diagnostics io.Writer, clock runtimeClock) int {
-	status, cleanup := executeWithClock(args, input, output, diagnostics, nil, clock)
-	if cleanup != nil {
-		cleanup()
-	}
-	return status
-}
-
 func execute(args []string, input io.Reader, output, diagnostics io.Writer) (int, func()) {
-	return executeWithReady(args, input, output, diagnostics, nil)
-}
-
-func executeWithReady(args []string, input io.Reader, output, diagnostics io.Writer, ready func()) (int, func()) {
-	return executeWithClock(args, input, output, diagnostics, ready, defaultRuntimeClock())
+	return executeWithClock(args, input, output, diagnostics, nil, defaultRuntimeClock())
 }
 
 // runtimeClock contains the process-wide time dependencies. Keeping these
@@ -226,7 +210,7 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 		ready()
 	}
 
-	if err := forwardWithFailureAndBufferAndStart(input, output, nil, gate.selected(), engine.Failures(), gate.commitOpen, gate.completeEmpty, config.bufferSize, engine.StartDurations); err != nil {
+	if err := forwardWithFailureAndBufferAndStart(input, output, gate.selected(), engine.Failures(), gate.commitOpen, gate.completeEmpty, config.bufferSize, engine.StartDurations); err != nil {
 		writeDiagnostic(diagnostics, err)
 		cleanup()
 		return 1, cleanup
@@ -234,30 +218,7 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 	return 0, cleanup
 }
 
-func forward(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}) error {
-	return forwardWithFailure(input, output, delay, release, nil, nil, nil)
-}
-
-func forwardWithFailure(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error) error {
-	return forwardWithFailureAndBuffer(input, output, delay, release, failures, open, completeEmpty, preReleaseBufferSize)
-}
-
-func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int) error {
-	return forwardWithFailureAndBufferAndStart(input, output, delay, release, failures, open, completeEmpty, bufferSize, nil)
-}
-
-func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, delay *time.Duration, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int, startDuration func() error) error {
-	if delay != nil && *delay == 0 {
-		if err := failureReady(failures); err != nil {
-			return err
-		}
-		if err := commitOpen(open, failures); err != nil {
-			return err
-		}
-		_, err := io.Copy(output, input)
-		return err
-	}
-
+func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int, startDuration func() error) error {
 	held := newHeldBuffer(bufferSize)
 	firstReadBuffer := held.nextReadBuffer()
 	firstResults := make(chan readResult, 1)
@@ -320,29 +281,16 @@ func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, dela
 				return err
 			}
 
-			var timer *time.Timer
-			var timerC <-chan time.Time
-			if delay != nil {
-				// Completion of the first non-empty read, rather than process
-				// startup, starts the duration window.
-				timer = time.NewTimer(*delay)
-				timerC = timer.C
-			}
-			if timer != nil {
-				defer timer.Stop()
-			}
 			if err := held.recordRead(result.n); err != nil {
 				return err
 			}
-			if startDuration != nil {
-				if err := startDuration(); err != nil {
-					return err
-				}
+			if err := startDuration(); err != nil {
+				return err
 			}
 			if result.err != nil {
-				return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.err)
+				return forwardHeldBufferUntilReleaseWithFailure(output, release, failures, open, held, result.err)
 			}
-			return forwardDelayedBufferWithFailure(input, output, timerC, release, failures, open, completeEmpty, held)
+			return forwardDelayedBufferWithFailure(input, output, release, failures, open, completeEmpty, held)
 		}
 	}
 }
@@ -459,19 +407,6 @@ func (held *heldBuffer) writeTo(output io.Writer) error {
 	return nil
 }
 
-func heldBufferFromSlice(data []byte, used, max int) *heldBuffer {
-	if max < len(data) {
-		max = len(data)
-	}
-	data = data[:len(data):len(data)]
-	return &heldBuffer{
-		chunks:   [][]byte{data},
-		used:     []int{used},
-		max:      max,
-		reserved: len(data),
-	}
-}
-
 type readResult struct {
 	n   int
 	err error
@@ -483,32 +418,18 @@ func startRead(input io.Reader, buffer []byte, results chan<- readResult) {
 	}()
 }
 
-func forwardHeldUntilRelease(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, held []byte, heldN int, readErr error) error {
-	return forwardHeldUntilReleaseWithFailure(output, timerC, release, nil, nil, held, heldN, readErr)
-}
-
-func forwardHeldUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error, held []byte, heldN int, readErr error) error {
-	return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, heldBufferFromSlice(held, heldN, len(held)), readErr)
-}
-
-func forwardHeldBufferUntilReleaseWithFailure(output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error, held *heldBuffer, readErr error) error {
-	if timerC != nil || release != nil || failures != nil {
-		select {
-		case err, ok := <-failures:
-			if !ok {
-				return errReleaseFailureChannelClosed
-			}
-			if err != nil {
-				return err
-			}
-		case <-timerC:
-			if err := commitOpen(open, failures); err != nil {
-				return err
-			}
-		case <-release:
-			if err := commitOpen(open, failures); err != nil {
-				return err
-			}
+func forwardHeldBufferUntilReleaseWithFailure(output io.Writer, release <-chan struct{}, failures <-chan error, open func() error, held *heldBuffer, readErr error) error {
+	select {
+	case err, ok := <-failures:
+		if !ok {
+			return errReleaseFailureChannelClosed
+		}
+		if err != nil {
+			return err
+		}
+	case <-release:
+		if err := commitOpen(open, failures); err != nil {
+			return err
 		}
 	}
 	if err := failureReady(failures); err != nil {
@@ -523,19 +444,7 @@ func forwardHeldBufferUntilReleaseWithFailure(output io.Writer, timerC <-chan ti
 	return readErr
 }
 
-func forwardDelayed(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, held []byte, heldN int) error {
-	return forwardDelayedWithFailure(input, output, timerC, release, nil, nil, nil, held, heldN)
-}
-
-func forwardDelayedWithFailure(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held []byte, heldN int) error {
-	return forwardDelayedWithFailureAndBuffer(input, output, timerC, release, failures, open, completeEmpty, held, heldN, len(held))
-}
-
-func forwardDelayedWithFailureAndBuffer(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held []byte, heldN, maxBufferSize int) error {
-	return forwardDelayedBufferWithFailure(input, output, timerC, release, failures, open, completeEmpty, heldBufferFromSlice(held, heldN, maxBufferSize))
-}
-
-func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held *heldBuffer) error {
+func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, held *heldBuffer) error {
 	readRequests := make(chan []byte)
 	readResults := make(chan readResult, 1)
 	go readWorker(input, readRequests, readResults)
@@ -545,7 +454,7 @@ func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <
 		if err := failureReady(failures); err != nil {
 			return err
 		}
-		if releaseReady(timerC, release) {
+		if releaseReady(release) {
 			if err := commitOpen(open, failures); err != nil {
 				return err
 			}
@@ -562,7 +471,7 @@ func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <
 			haveRead bool
 		)
 		// Prefer a result that is already available so the readiness check
-		// below can observe a timer/release that became ready while the read
+		// below can observe a selected release that became ready while the read
 		// completed. This keeps a completed pre-release read from starting
 		// another read.
 		select {
@@ -592,14 +501,6 @@ func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <
 					return err
 				}
 				return forwardReadResultWithCompletion(input, output, readBuffer, <-readResults, completeEmpty)
-			case <-timerC:
-				if err := commitOpen(open, failures); err != nil {
-					return err
-				}
-				if err := held.writeTo(output); err != nil {
-					return err
-				}
-				return forwardReadResultWithCompletion(input, output, readBuffer, <-readResults, completeEmpty)
 			case result = <-readResults:
 				haveRead = true
 			}
@@ -612,12 +513,12 @@ func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <
 			return err
 		}
 		if result.err != nil {
-			return forwardHeldBufferUntilReleaseWithFailure(output, timerC, release, failures, open, held, result.err)
+			return forwardHeldBufferUntilReleaseWithFailure(output, release, failures, open, held, result.err)
 		}
 
-		// A timer/release can become ready immediately after the read result.
+		// A release can become ready immediately after the read result.
 		// Check again before requesting another bounded-buffer read.
-		if releaseReady(timerC, release) {
+		if releaseReady(release) {
 			if err := commitOpen(open, failures); err != nil {
 				return err
 			}
@@ -625,10 +526,8 @@ func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <
 		}
 	}
 
-	if timerC != nil || release != nil {
-		if err := waitForRelease(timerC, release, failures, open); err != nil {
-			return err
-		}
+	if err := waitForRelease(release, failures, open); err != nil {
+		return err
 	}
 	if err := failureReady(failures); err != nil {
 		return err
@@ -640,10 +539,8 @@ func forwardDelayedBufferWithFailure(input io.Reader, output io.Writer, timerC <
 	return err
 }
 
-func releaseReady(timerC <-chan time.Time, release <-chan struct{}) bool {
+func releaseReady(release <-chan struct{}) bool {
 	select {
-	case <-timerC:
-		return true
 	case <-release:
 		return true
 	default:
@@ -676,7 +573,7 @@ func commitOpen(open func() error, failures <-chan error) error {
 	return open()
 }
 
-func waitForRelease(timerC <-chan time.Time, release <-chan struct{}, failures <-chan error, open func() error) error {
+func waitForRelease(release <-chan struct{}, failures <-chan error, open func() error) error {
 	if err := failureReady(failures); err != nil {
 		return err
 	}
@@ -688,16 +585,10 @@ func waitForRelease(timerC <-chan time.Time, release <-chan struct{}, failures <
 		if err != nil {
 			return err
 		}
-	case <-timerC:
-		return commitOpen(open, failures)
 	case <-release:
 		return commitOpen(open, failures)
 	}
 	return nil
-}
-
-func forwardHeldAndCopy(input io.Reader, output io.Writer, held []byte) error {
-	return forwardHeldBufferAndCopy(input, output, heldBufferFromSlice(held, len(held), len(held)))
 }
 
 func forwardHeldBufferAndCopy(input io.Reader, output io.Writer, held *heldBuffer) error {
@@ -723,10 +614,6 @@ func readInto(input io.Reader, buffer []byte) readResult {
 		return readResult{err: fmt.Errorf("invalid input read count %d", n)}
 	}
 	return readResult{n: n, err: err}
-}
-
-func forwardReadResult(input io.Reader, output io.Writer, readBuffer []byte, result readResult) error {
-	return forwardReadResultWithCompletion(input, output, readBuffer, result, nil)
 }
 
 func forwardReadResultWithCompletion(input io.Reader, output io.Writer, readBuffer []byte, result readResult, completeEmpty func() error) error {

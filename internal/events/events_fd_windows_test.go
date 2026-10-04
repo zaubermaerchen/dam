@@ -104,7 +104,8 @@ func TestWindowsNowaitPipeEmitsOrderedJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open NOWAIT event pipe: %v", err)
 	}
-	sink.EmitOpen()
+	sink.EmitReleaseSelected()
+	sink.EmitStreamOpen()
 	sink.Close()
 	currentMode, err := getWindowsPipeMode(syscall.Handle(fd))
 	if err != nil || currentMode&pipeNowait == 0 {

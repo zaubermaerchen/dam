@@ -238,6 +238,28 @@ func TestParseConfigRejectsMalformedAbsoluteDeadlines(t *testing.T) {
 	}
 }
 
+func TestParseConfigExplainsInvalidDatetime(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{"datetime:2026-02-29T12:00", "not a valid local datetime"},
+		{"datetime:2026-12-31T23:59:00+24:00", "timezone offset is out of range"},
+		{"datetime:0000-01-01T00:00", "year must be between 0001 and 9999"},
+		{"datetime:2026-12-31T23:59:60Z", "must use RFC3339 with seconds and timezone"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			_, err := parseConfigAt([]string{tc.value}, time.UTC)
+			if err == nil {
+				t.Fatal("parseConfigAt unexpectedly succeeded")
+			}
+			if got := err.Error(); !strings.Contains(got, tc.value) || !strings.Contains(got, tc.want) {
+				t.Fatalf("error = %q, want condition and %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseConfigAcceptsMultipleKindsOfTimedConditions(t *testing.T) {
 	config, err := parseConfigAt([]string{
 		"duration:1s",

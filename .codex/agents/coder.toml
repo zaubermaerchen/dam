@@ -5,7 +5,7 @@ Use proactively for writing code, fixing bugs, refactoring,
 implementing features, and adding tests.
 """
 
-model = "gpt-6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 
@@ -26,6 +26,7 @@ While implementing:
 - Do not perform unrelated refactors.
 - Do not silently weaken types, validation, error handling, or tests.
 - Add or update tests for new behavior and bug fixes.
+- Return important implementation decisions and behavior changes not specified in the issue or request to the parent before implementing them.
 
 Verification:
 - Run the narrowest relevant tests first.

@@ -182,6 +182,8 @@ jobs:
     needs:
       - prepare
       - build
+    outputs:
+      homebrew-eligible: ${{ steps.homebrew-eligibility.outputs.homebrew-eligible }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -244,3 +246,30 @@ jobs:
             "release/dam_${VERSION}_windows_arm64.zip"
           )
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME" "${archives[@]}" release/SHA256SUMS
+      - name: Select Homebrew update
+        id: homebrew-eligibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'homebrew-eligible=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'homebrew-eligible=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  homebrew:
+    name: Update Homebrew formula
+    needs:
+      - prepare
+      - release
+    if: github.event_name == 'push' && needs.release.outputs.homebrew-eligible == 'true'
+    permissions:
+      contents: read
+    uses: zaubermaerchen/homebrew-tap/.github/workflows/update-formula.yml@18a30289f199e21a6ddd1d5be1b57f6249fe0622
+    with:
+      formula: dam
+      tag: ${{ needs.prepare.outputs.version }}
+      automation-ref: 18a30289f199e21a6ddd1d5be1b57f6249fe0622
+      app-id: ${{ vars.HOMEBREW_TAP_APP_ID }}
+    secrets:
+      app-private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}

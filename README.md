@@ -59,6 +59,21 @@ flow and signals, rather than a strict model of Unix pipes.
 | [`outage`](https://github.com/zaubermaerchen/outage) | Cut flow when a condition is triggered |
 | [`sluice`](https://github.com/zaubermaerchen/sluice) | Switch flow between open and closed states |
 
+## Install with Homebrew
+
+Install from the [Homebrew tap](https://github.com/zaubermaerchen/homebrew-tap):
+
+```bash
+brew install zaubermaerchen/tap/dam
+```
+
+Alternatively, add the tap first:
+
+```bash
+brew tap zaubermaerchen/tap
+brew install dam
+```
+
 ## Build
 
 Go 1.22 or later is required.

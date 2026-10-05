@@ -16,7 +16,7 @@ func TestReleaseWorkflowHomebrewHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(workflow)
+	content := strings.ReplaceAll(string(workflow), "\r\n", "\n")
 	for _, required := range []string{
 		"homebrew-eligible: ${{ steps.homebrew-eligibility.outputs.homebrew-eligible }}",
 		"needs.release.outputs.homebrew-eligible == 'true'",

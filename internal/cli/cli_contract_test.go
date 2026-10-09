@@ -726,19 +726,44 @@ func TestParseConfigRejectsMissingOrAdjacentORConditionsAndRemovedSyntax(t *test
 }
 
 func TestParseConfigCompoundReleaseUsesExactSeparatorWithoutTrimming(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		paths []string
+	}{
+		{"exact separator", "file:a1 && file:a2", []string{"a1", "a2"}},
+		{"missing right space", "file:a1 &&file:a2", []string{"a1 &&file:a2"}},
+		{"missing left space", "file:a1&& file:a2", []string{"a1&& file:a2"}},
+		{"no spaces", "file:a&&b", []string{"a&&b"}},
+		{"extra left space", "file:a1  && file:a2", []string{"a1 ", "a2"}},
+		{"tabs are literal", "file:a1\t&&\tfile:a2", []string{"a1\t&&\tfile:a2"}},
+		{"non-ASCII spaces are literal", "file:a1\u00a0&&\u00a0file:a2", []string{"a1\u00a0&&\u00a0file:a2"}},
+		{"path whitespace", "file: a1 ", []string{" a1 "}},
+		{"member path whitespace", "file: a1  && file: a2 ", []string{" a1 ", " a2 "}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := parseConfig([]string{test.value})
+			if err != nil {
+				t.Fatalf("parseConfig returned error: %v", err)
+			}
+			if len(config.groups) != 1 || len(config.groups[0].members) != len(test.paths) {
+				t.Fatalf("groups = %#v, want one group with %d members", config.groups, len(test.paths))
+			}
+			for index, path := range test.paths {
+				if got := config.groups[0].members[index]; got.kind != "file" || got.source != path {
+					t.Errorf("member %d = %#v, want file path %q", index, got, path)
+				}
+			}
+		})
+	}
+
 	config, err := parseConfig([]string{"file:ready  && signal:USR1"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
 	if got, want := config.groups[0].members[0].source, "ready "; got != want {
 		t.Fatalf("first file source = %q, want %q", got, want)
-	}
-	pathConfig, err := parseConfig([]string{"file:a&&b"})
-	if err != nil {
-		t.Fatalf("parseConfig rejected non-separator ampersands: %v", err)
-	}
-	if got, want := pathConfig.groups[0].members[0].source, "a&&b"; got != want {
-		t.Fatalf("non-separator path = %q, want %q", got, want)
 	}
 
 	for _, value := range []string{

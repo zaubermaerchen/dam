@@ -88,7 +88,13 @@ var errReleaseFailureChannelClosed = errors.New("internal error: release failure
 func main() {
 	// Keep configured signals registered until os.Exit so they remain consumed
 	// during normal CLI shutdown. The run wrapper cleans up long-lived unit tests.
-	status, _ := execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	var waitWarning func()
+	status, _ := executeWithClockAndExitWait(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, nil, defaultRuntimeClock(), &waitWarning)
+	if waitWarning != nil {
+		// Only process exit spends the warning budget; stream transfer and
+		// cleanup remain independent of a blocked stderr.
+		waitWarning()
+	}
 	os.Exit(status)
 }
 
@@ -134,6 +140,12 @@ func (clock runtimeClock) normalized() runtimeClock {
 }
 
 func executeWithClock(args []string, input io.Reader, output, diagnostics io.Writer, ready func(), clock runtimeClock) (int, func()) {
+	return executeWithClockAndExitWait(args, input, output, diagnostics, ready, clock, nil)
+}
+
+// executeWithClockAndExitWait exposes only warning completion to main so gate
+// cleanup can remain deferred until process exit, preserving signal handling.
+func executeWithClockAndExitWait(args []string, input io.Reader, output, diagnostics io.Writer, ready func(), clock runtimeClock, exitWait *func()) (int, func()) {
 	if slices.Contains(args, "-h") || slices.Contains(args, "--help") {
 		if err := writeAll(output, []byte(helpText)); err != nil {
 			writeDiagnostic(diagnostics, err)
@@ -172,6 +184,10 @@ func executeWithClock(args []string, input io.Reader, output, diagnostics io.Wri
 	if err != nil {
 		writeDiagnostic(diagnostics, err)
 		return 2, nil
+	}
+
+	if exitWait != nil {
+		*exitWait = eventSink.WaitWarning
 	}
 
 	engine, err := condition.New(config.conditionPlan(), condition.Options{

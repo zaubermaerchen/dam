@@ -39,6 +39,7 @@ func TestSinkWarningDoesNotBlockDataPath(t *testing.T) {
 	go func() {
 		sink.EmitReleaseSelected()
 		sink.EmitStreamOpen()
+		sink.Close()
 		close(done)
 	}()
 	select {
@@ -118,3 +119,58 @@ func (writer *failingEventFD) Write(data []byte) (int, error) {
 }
 
 func (*failingEventFD) Close() error { return nil }
+
+func TestSinkWaitWarningCompletion(t *testing.T) {
+	started, unblock := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-unblock:
+		default:
+			close(unblock)
+		}
+	})
+	sink := &Sink{writer: &failingEventFD{err: io.ErrClosedPipe}, diagnostics: blockingDiagnostic{started: started, unblock: unblock}}
+	sink.EmitReleaseSelected()
+	<-started
+	close(unblock)
+	// Warning delivery is best effort: observe actual completion rather than
+	// assuming the warning goroutine must run inside the exit timer budget.
+	select {
+	case <-sink.warningDone:
+	case <-time.After(time.Second):
+		t.Fatal("warning write did not complete after unblocking")
+	}
+	sink.WaitWarning()
+}
+
+func TestSinkWaitWarningBlockedIsBoundedAndNotRepeated(t *testing.T) {
+	started, unblock := make(chan struct{}), make(chan struct{})
+	defer close(unblock)
+	sink := &Sink{writer: &failingEventFD{err: io.ErrClosedPipe}, diagnostics: blockingDiagnostic{started: started, unblock: unblock}}
+	sink.EmitReleaseSelected()
+	<-started
+	sink.Close()
+	start := time.Now()
+	sink.WaitWarning()
+	if elapsed := time.Since(start); elapsed < 10*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("blocked warning wait = %v, want bounded 10ms timer", elapsed)
+	}
+	// Check the single-use state directly; a quick return can still take more
+	// than 10ms of wall-clock time if the test goroutine is descheduled.
+	sink.warningWait.Do(func() { t.Fatal("first wait did not consume its single-use budget") })
+	sink.WaitWarning()
+	sink.warningWait.Do(func() { t.Fatal("repeated wait reset its single-use budget") })
+}
+
+func TestSinkWaitWarningCompletedOrAbsent(t *testing.T) {
+	completed := make(chan struct{})
+	close(completed)
+	for name, sink := range map[string]*Sink{"nil": nil, "absent": {}, "completed": {warningDone: completed}} {
+		t.Run(name, func(t *testing.T) {
+			sink.WaitWarning()
+			if sink != nil {
+				sink.warningWait.Do(func() { t.Fatal("wait did not consume its single-use budget") })
+			}
+		})
+	}
+}

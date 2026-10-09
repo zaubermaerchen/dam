@@ -348,8 +348,22 @@ a signal condition.
 ## Development
 
 ```bash
-gofmt -w cmd/dam/*.go
+git ls-files -z -- '*.go' | xargs -0 gofmt -w
 go test ./...
 go test -race ./...
 go vet ./...
+```
+
+Formatting covers every tracked Go file, including generated code. The
+repository has no vendored code; revisit this policy before adding a vendor
+tree. CI checks formatting on Ubuntu without modifying files. Run the same
+check locally in Bash:
+
+```bash
+set -euo pipefail
+unformatted=$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)
+if [[ -n "$unformatted" ]]; then
+  printf '%s\n' "$unformatted"
+  exit 1
+fi
 ```

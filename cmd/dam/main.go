@@ -46,9 +46,15 @@ Arguments:
               equivalent on supported Unix targets.
           file:PATH
               Release when PATH resolves to a regular file on any target.
-        Conditions joined by " && " inside one argument form an AND group.
-        Quote AND groups so the shell passes " && " literally. Every member
-        is latched once satisfied. Use --or between alternative conditions.
+        Conditions joined by the exact ASCII separator " && " inside one
+        argument form an AND group. Quote the entire group. Every member is
+        latched once satisfied. Use --or between alternative conditions.
+        File paths preserve leading/trailing whitespace without trimming.
+        Without that separator, "&&" is literal path text without a warning:
+          "file:a1 &&file:a2" -> one path "a1 &&file:a2"
+          "file:a1&& file:a2" -> one path "a1&& file:a2"
+          "file:a1  && file:a2" -> AND paths "a1 " and "a2"
+        The exact " && " separator cannot be literal text in a file path.
 
 Options:
   --or CONDITION

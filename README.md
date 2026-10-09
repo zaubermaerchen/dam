@@ -178,6 +178,20 @@ the literal ` && ` to `dam`:
 dam 'signal:USR1 && file:/tmp/ready'
 ```
 
+The separator is exactly one ASCII space, `&&`, and one ASCII space. When
+`&&` does not have an ASCII space immediately on both sides, it remains
+literal text in a `file:` path, without a warning.
+File paths retain leading and trailing whitespace; no trimming occurs:
+
+| Quoted argument | Parsed file paths |
+| --- | --- |
+| `'file:a1 &&file:a2'` | One path: `a1 &&file:a2` |
+| `'file:a1&& file:a2'` | One path: `a1&& file:a2` |
+| `'file:a1  && file:a2'` | Two AND members: `a1 ` (trailing space) and `a2` |
+
+The exact ` && ` separator always splits an argument, so it cannot be included
+literally in a file path; shell quoting does not escape it for the parser.
+
 In PowerShell, single quotes provide the same protection. In `cmd.exe`, use
 double quotes around a compound value, for example
 `dam "file:C:\ready && file:C:\approved"`; shell quoting only affects

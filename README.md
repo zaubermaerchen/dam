@@ -154,7 +154,11 @@ becomes visible to the data path. This also applies to a startup-satisfied
 condition when stdin is still blocked or empty; an empty stdin that reaches
 EOF without a release emits neither record. If a descriptor loses its
 nonblocking state or a write fails, dam attempts one `events disabled: ...`
-warning without waiting for stderr and continues the primary stream. A short
+warning without waiting for stderr and continues the primary stream. Only
+immediately before process exit, dam gives an outstanding warning one 10ms
+timer budget; blocked stderr cannot prevent exit, and warning delivery remains
+best effort. Completed warnings incur no wait, and warning failures do not
+replace the primary error or exit status. A short
 write may leave a partial final JSONL record. The descriptor and its mode
 remain owned by the caller.
 The pipeline data still flows only through stdout.

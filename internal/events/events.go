@@ -24,6 +24,8 @@ type Sink struct {
 	disabled        bool
 	releaseSelected bool
 	streamOpen      bool
+	warningDone     chan struct{}
+	warningWait     sync.Once
 }
 
 // New opens a duplicate of fd for event output. The caller retains ownership
@@ -110,7 +112,12 @@ func (sink *Sink) disableLocked(err error) {
 		// primary data path. Warning delivery is best effort.
 		diagnostics := sink.diagnostics
 		warning := fmt.Sprintf("events disabled: %v\n", err)
-		go func() { _, _ = io.WriteString(diagnostics, warning) }()
+		done := make(chan struct{})
+		sink.warningDone = done
+		go func() {
+			defer close(done)
+			_, _ = io.WriteString(diagnostics, warning)
+		}()
 	}
 }
 
@@ -126,4 +133,33 @@ func (sink *Sink) Close() {
 		sink.writer = nil
 	}
 	sink.disabled = true
+}
+
+// WaitWarning gives an outstanding best-effort warning one 10ms timer budget.
+// Call it only at the process exit boundary: stream operations and Close must
+// never wait for stderr. Delivery is not guaranteed, and repeated calls do not
+// accumulate waiting time. Scheduler delays can exceed the timer budget.
+func (sink *Sink) WaitWarning() {
+	if sink == nil {
+		return
+	}
+	sink.warningWait.Do(func() {
+		sink.mu.Lock()
+		done := sink.warningDone
+		sink.mu.Unlock()
+		if done == nil {
+			return
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+		}
+	})
 }

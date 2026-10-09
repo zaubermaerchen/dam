@@ -232,7 +232,7 @@ func executeWithClockAndExitWait(args []string, input io.Reader, output, diagnos
 		ready()
 	}
 
-	if err := forwardWithFailureAndBufferAndStart(input, output, gate.selected(), engine.Failures(), gate.commitOpen, gate.completeEmpty, config.bufferSize, engine.StartDurations); err != nil {
+	if err := forwardWithReleaseAndBuffer(input, output, gate.selected(), engine.Failures(), gate.commitOpen, gate.completeEmpty, config.bufferSize, engine.StartDurations); err != nil {
 		writeDiagnostic(diagnostics, err)
 		cleanup()
 		return 1, cleanup
@@ -240,7 +240,8 @@ func executeWithClockAndExitWait(args []string, input io.Reader, output, diagnos
 	return 0, cleanup
 }
 
-func forwardWithFailureAndBufferAndStart(input io.Reader, output io.Writer, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int, startDuration func() error) error {
+// startDuration must be nonnil; callers without duration monitoring pass a no-op.
+func forwardWithReleaseAndBuffer(input io.Reader, output io.Writer, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int, startDuration func() error) error {
 	held := newHeldBuffer(bufferSize)
 	firstReadBuffer := held.nextReadBuffer()
 	firstResults := make(chan readResult, 1)
@@ -408,13 +409,6 @@ func (held *heldBuffer) recordRead(n int) error {
 	}
 	held.used[last] += n
 	return nil
-}
-
-func (held *heldBuffer) reservedCapacity() int {
-	if held == nil {
-		return 0
-	}
-	return held.reserved
 }
 
 func (held *heldBuffer) writeTo(output io.Writer) error {

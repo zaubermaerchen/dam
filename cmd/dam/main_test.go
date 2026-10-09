@@ -45,7 +45,14 @@ func forward(input io.Reader, output io.Writer, release <-chan struct{}) error {
 }
 
 func forwardWithFailureAndBuffer(input io.Reader, output io.Writer, release <-chan struct{}, failures <-chan error, open, completeEmpty func() error, bufferSize int) error {
-	return forwardWithFailureAndBufferAndStart(input, output, release, failures, open, completeEmpty, bufferSize, func() error { return nil })
+	return forwardWithReleaseAndBuffer(input, output, release, failures, open, completeEmpty, bufferSize, func() error { return nil })
+}
+
+func (held *heldBuffer) reservedCapacity() int {
+	if held == nil {
+		return 0
+	}
+	return held.reserved
 }
 
 const expectedHelpText = `Usage:

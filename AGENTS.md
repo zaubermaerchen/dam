@@ -31,7 +31,7 @@
 - `cmd/dam/main.go`: version、遅延・注入 release ゲート、stdin/stdout 転送、終了コードを担当します。
 - `cmd/dam/cli_adapter.go`: `internal/cli` の validated plan を `internal/condition` の typed plan へ変換します。
 - `cmd/dam/release_gate.go`: root condition の成立を runtime の CLOSED → OPEN 遷移と公開 lifecycle event へ接続します。
-- `cmd/dam/events_adapter.go`: `internal/events` の platform capability を runtime tests へ接続します。
+- `cmd/dam/events_test.go`: test-only adapter で `internal/events` の platform capability を runtime tests へ接続します。
 - `cmd/dam/describe.go`: `--describe` の compact JSON schema、CLI/stream/state metadata、build-specific signal capability を担当します。
 - `internal/cli/`: argv、condition syntax、AND/OR groups、buffer/events-fd validation を担当します。
 - `internal/events/`: JSONL lifecycle event serialization、warn-once、descriptor duplication、OS別 transport を担当します。

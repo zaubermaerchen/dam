@@ -1,5 +1,8 @@
 package condition
 
+// This file verifies filesystem probes and engine lifecycle with test-only
+// failure injection.
+
 import (
 	"errors"
 	"fmt"
@@ -15,6 +18,32 @@ import (
 )
 
 const fileMonitorTestTimeout = time.Second
+
+func newEngine(initializing bool) *Engine {
+	return newEngineWithGroups(initializing, nil)
+}
+
+func (c *Engine) reportFatal(err error) {
+	if err == nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reportFatalLocked(err)
+}
+
+func (c *Engine) reportFatalLocked(err error) {
+	if err == nil {
+		return
+	}
+	if c.rootSatisfied || c.closed || c.fatalErr != nil {
+		return
+	}
+	c.fatalErr = err
+	c.fatal <- err
+	c.stopFilesLocked()
+}
 
 func (m *fileMonitor) Close() {
 	if m != nil && m.engine != nil {

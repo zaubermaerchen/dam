@@ -28,10 +28,6 @@ type Group struct {
 	Members []Condition
 }
 
-func newEngine(initializing bool) *Engine {
-	return newEngineWithGroups(initializing, nil)
-}
-
 type groupState struct {
 	members   []memberState
 	remaining int
@@ -89,28 +85,6 @@ func newEngineWithGroups(initializing bool, groups []Group) *Engine {
 		conditionIndex: conditionIndex,
 		filePaths:      filePaths,
 	}
-}
-
-func (c *Engine) reportFatal(err error) {
-	if err == nil {
-		return
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.reportFatalLocked(err)
-}
-
-func (c *Engine) reportFatalLocked(err error) {
-	if err == nil {
-		return
-	}
-	if c.rootSatisfied || c.closed || c.fatalErr != nil {
-		return
-	}
-	c.fatalErr = err
-	c.fatal <- err
-	c.stopFilesLocked()
 }
 
 // satisfyCondition records one physical event for every matching member. It
@@ -190,20 +164,6 @@ func (c *Engine) filePathSatisfied(path string) bool {
 func (c *Engine) filePathSatisfiedLocked(path string) bool {
 	state := c.filePaths[path]
 	return state != nil && state.remaining == 0
-}
-
-// reportFileFatal remains available for engine-level failure reporting;
-// file probes no longer call it because stat failures are retryable.
-func (c *Engine) reportFileFatal(path string, err error) {
-	if err == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.filePathSatisfiedLocked(path) {
-		return
-	}
-	c.reportFatalLocked(err)
 }
 
 func (c *Engine) finishInitial() error {

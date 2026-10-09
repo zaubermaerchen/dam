@@ -15,7 +15,13 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/zaubermaerchen/dam/internal/events"
 )
+
+func eventFDSupported() bool {
+	return events.Supported()
+}
 
 func TestEventsFDDoesNotOverrideHelpOrDescribePriority(t *testing.T) {
 	var output, diagnostics bytes.Buffer
